@@ -19,6 +19,7 @@ from app.core.security import create_access_token
 from app.models.audit import AuditLog, AuditAction
 from app.models.refund import RefundApplication, RefundStatus
 from app.core.database import async_session_maker
+from langchain_core.messages import HumanMessage
 from sqlmodel import select, desc
 
 
@@ -68,10 +69,7 @@ async def test_v4():
             "intent": None,
             "audit_required": False,
             "audit_log_id": None,
-            "messages": [],
-            "refund_flow_active": None,
-            "refund_order_sn": None,
-            "refund_step": None,
+            "messages": [HumanMessage(content=case["query"])],
             "answer":  ""
         }
         

@@ -1,5 +1,6 @@
 # app/graph/state.py
-from typing import TypedDict, List, Optional, Annotated, Dict, Any
+from typing import TypedDict, List, Optional, Annotated
+from langchain_core.messages import BaseMessage
 import operator
 
 class AgentState(TypedDict):
@@ -27,12 +28,7 @@ class AgentState(TypedDict):
     audit_log_id: Optional[int]  # 审计日志ID
     
     # v4.0 新增：结构化消息列表
-    messages:  Annotated[List[Dict[str, Any]], operator.add]
-    
-    # v3.0 保留：退货流程状态
-    refund_flow_active: Optional[bool]
-    refund_order_sn: Optional[str]
-    refund_step: Optional[str]
+    messages:  Annotated[List[BaseMessage], operator.add]
     
     # 最终回复
     answer: str

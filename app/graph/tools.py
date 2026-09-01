@@ -4,6 +4,7 @@ LangGraph Tools: Agent 可调用的工具函数
 """
 from typing import Optional, Annotated
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 from pydantic import Field
 
 from app.core.database import async_session_maker
@@ -14,6 +15,12 @@ from app.services.refund_service import (
 )
 from app.models.order import Order
 from sqlmodel import select
+from app.core.config import settings
+from app.models.audit import AuditAction, AuditLog, RiskLevel
+from app.models.refund import RefundStatus
+from app.tasks.refund_tasks import notify_admin_audit
+from app.websocket.manager import manager
+from datetime import datetime, timezone
 
 
 # ==========================================
@@ -23,7 +30,7 @@ from sqlmodel import select
 @tool
 async def check_refund_eligibility(
     order_sn:  Annotated[str, Field(description="订单号，格式如 SN20240001")],
-    user_id: Annotated[int, Field(description="当前登录用户的ID")]
+    user_id: Annotated[int, InjectedState("user_id")]
 ) -> str:
     """
     检查订单是否符合退货条件。
@@ -77,7 +84,8 @@ async def check_refund_eligibility(
 @tool
 async def submit_refund_application(
     order_sn: Annotated[str, Field(description="订单号，格式如 SN20240001")],
-    user_id: Annotated[int, Field(description="当前登录用户的ID")],
+    user_id: Annotated[int, InjectedState("user_id")],
+    thread_id: Annotated[str, InjectedState("thread_id")],
     reason_detail: Annotated[str, Field(description="用户填写的退货原因详细描述")],
     reason_category: Annotated[
         Optional[str], 
@@ -131,19 +139,58 @@ async def submit_refund_application(
         
         # 4. 格式化返回结果
         if success and refund_app:
+            refund_amount = float(refund_app.refund_amount)
+            if refund_amount < settings.MEDIUM_RISK_REFUND_AMOUNT:
+                refund_app.status = RefundStatus.APPROVED
+                refund_app.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(refund_app)
+                await session.commit()
+                return (
+                    f"✅ 退货申请已自动审核通过。\n"
+                    f"申请编号：#{refund_app.id}\n退款金额：¥{refund_amount}\n"
+                    "资金将在 3-5 个工作日内原路退回，请注意查收。"
+                )
+
+            risk_level = (
+                RiskLevel.HIGH
+                if refund_amount >= settings.HIGH_RISK_REFUND_AMOUNT
+                else RiskLevel.MEDIUM
+            )
+            threshold = (
+                settings.HIGH_RISK_REFUND_AMOUNT
+                if risk_level == RiskLevel.HIGH
+                else settings.MEDIUM_RISK_REFUND_AMOUNT
+            )
+            trigger_reason = f"{risk_level} 风险退款申请：¥{refund_amount} (≥ ¥{threshold})"
+            audit_log = AuditLog(
+                thread_id=thread_id,
+                user_id=user_id,
+                order_id=order.id,
+                refund_application_id=refund_app.id,
+                trigger_reason=trigger_reason,
+                risk_level=risk_level,
+                action=AuditAction.PENDING,
+                context_snapshot={"order_sn": order_sn, "reason": reason_detail},
+            )
+            session.add(audit_log)
+            await session.commit()
+            await session.refresh(audit_log)
+
+            try:
+                notify_admin_audit.delay(audit_log.id)
+                await manager.notify_status_change(
+                    thread_id=thread_id,
+                    status="WAITING_ADMIN",
+                    data={"risk_level": risk_level, "audit_log_id": audit_log.id, "refund_amount": refund_amount},
+                )
+            except Exception as exc:
+                # 通知失败不能回滚已经创建的退款申请和审计记录。
+                print(f"[Refund tool] 审核通知失败: {exc}")
             return (
-                f"✅ 退货申请提交成功！\n\n"
-                f"📋 申请信息：\n"
-                f"  - 申请编号：#{refund_app.id}\n"
-                f"  - 订单号：{order_sn}\n"
-                f"  - 退款金额：¥{refund_app.refund_amount}\n"
-                f"  - 申请状态：{refund_app.status}（待审核）\n"
-                f"  - 退货原因：{refund_app.reason_detail}\n\n"
-                f"⏳ 后续流程：\n"
-                f"  1. 我们会在 1-2 个工作日内审核您的申请\n"
-                f"  2. 审核通过后，请将商品寄回（保持包装完好）\n"
-                f"  3. 收到退货后，我们会在 3-5 个工作日内完成退款\n\n"
-                f"💡 温馨提示：您可以随时查询申请进度。"
+                f"⏳ 退货申请已提交，需人工审核。\n"
+                f"申请编号：#{refund_app.id}\n退款金额：¥{refund_amount}\n"
+                f"风险等级：{risk_level}\n触发原因：{trigger_reason}\n"
+                "我们将在 24 小时内完成审核，您可稍后查询进度。"
             )
         else:
             return f"❌ 退货申请失败。\n原因：{message}"
@@ -155,7 +202,7 @@ async def submit_refund_application(
 
 @tool
 async def query_refund_status(
-    user_id: Annotated[int, Field(description="当前登录用户的ID")],
+    user_id: Annotated[int, InjectedState("user_id")],
     refund_id: Annotated[
         Optional[int], 
         Field(description="退货申请编号，如果不提供则返回用户所有退货申请")

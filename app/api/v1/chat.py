@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from app.core.security import get_current_user_id
 from app.api.v1.schemas import ChatRequest
 from langchain_core.runnables import RunnableConfig 
+from langchain_core.messages import HumanMessage
 
 router = APIRouter()
 
@@ -38,10 +39,13 @@ async def chat(
         initial_state = {
             "question":  request.question,
             "user_id": current_user_id,
+            "thread_id": thread_id,
             "history": [], 
             "context": [],
             "order_data": None,
-            "answer": ""
+            "answer": "",
+            # messages 使用 add reducer；每轮显式追加本轮用户消息，供退款 Tool Agent 消费。
+            "messages": [HumanMessage(content=request.question)],
         }
 
         try:

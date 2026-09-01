@@ -2,8 +2,10 @@
 import redis.asyncio as redis
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
+from langgraph.prebuilt import ToolNode
 from app.graph.state import AgentState
-from app.graph.nodes import retrieve, generate, intent_router, query_order, handle_refund, check_refund_eligibility  
+from app.graph.nodes import retrieve, generate, intent_router, query_order, refund_agent, should_call_refund_tool
+from app.graph.tools import refund_tools
 from app.core.config import settings
 
 
@@ -18,23 +20,9 @@ def route_intent(state: AgentState):
         return "query_order"
     elif intent == "POLICY":
         return "retrieve"
-    elif intent == "REFUND":  
-        return "handle_refund"
+    elif intent == "REFUND":
+        return "refund_agent"
     return "generate"
-
-
-def route_after_refund(state: AgentState):
-    """
-    退货流程后的路由
-    - 如果需要审核，直接结束（等待管理员）
-    - 否则继续生成最终回复
-    """
-    if state.get("audit_required", False):
-        # 需要人工审核，直接结束流程
-        return END
-    else:
-        # 不需要审核，生成最终回复
-        return "generate"
 
 
 # 2. 构建图 (只定义结构，不编译)
@@ -44,8 +32,8 @@ workflow = StateGraph(AgentState)
 workflow.add_node("intent_router", intent_router)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("query_order", query_order)
-workflow.add_node("handle_refund", handle_refund)  
-workflow.add_node("check_refund_eligibility", check_refund_eligibility)  # v4.0 新增审核节点
+workflow.add_node("refund_agent", refund_agent)
+workflow.add_node("refund_tools", ToolNode(refund_tools))
 workflow.add_node("generate", generate)
 
 # 设置入口
@@ -58,7 +46,7 @@ workflow.add_conditional_edges(
     {
         "query_order": "query_order",
         "retrieve": "retrieve",
-        "handle_refund": "handle_refund",
+        "refund_agent": "refund_agent",
         "generate": "generate"
     }
 )
@@ -69,18 +57,15 @@ workflow.add_edge("query_order", "generate")
 # 知识检索后 -> 生成回复
 workflow.add_edge("retrieve", "generate")
 
-# v4.0 关键修复：退货流程
-# handle_refund -> check_refund_eligibility -> 根据审核结果路由
-workflow.add_edge("handle_refund", "check_refund_eligibility")
-
 workflow.add_conditional_edges(
-    "check_refund_eligibility",
-    route_after_refund,
+    "refund_agent",
+    should_call_refund_tool,
     {
-        "generate": "generate",
-        END: END
+        "refund_tools": "refund_tools",
+        "done": END,
     }
 )
+workflow.add_edge("refund_tools", "refund_agent")
 
 # 生成回复后结束
 workflow.add_edge("generate", END)
