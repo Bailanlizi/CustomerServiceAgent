@@ -1,0 +1,375 @@
+{
+  "dataset_name": "服装电商退货政策 RAG 评估测试集",
+  "version": "1.0",
+  "description": "面向 RAGAS 评估的测试集。每条含 question（问题）与 ground_truth（标准答案），后续由检索器补 contexts、生成器补 answer 后组装成 RAGAS EvaluationDataset。expected_sources 为「应命中的权威条款编号」，用于检索命中的精确校验（RAGAS 不会自动判定编号命中）。",
+  "field_spec": {
+    "id": "题目唯一编号",
+    "question": "用户自然语言提问",
+    "ground_truth": "标准答案（纯语义，供 RAGAS answer_correctness / answer_similarity 使用）",
+    "expected_sources": "应命中的权威条款编号列表；第 1 个为主权威条款，FAQ_xxx 为次优命中（FAQ 是引用式转述）",
+    "category": "题型维度，用于分析不同维度的评估表现",
+    "difficulty": "难度：easy（单条款直查）/ medium（边界或量化）/ hard（多条款冲突或多跳综合）"
+  },
+  "items": [
+    {
+      "id": "Q001",
+      "question": "我是黑卡会员，买的内衣试穿过了，还能退吗？",
+      "ground_truth": "不能退。黑卡会员可退贴身衣物，但前提是未使用、未洗涤；已经试穿属于已使用，不符合退货条件。",
+      "expected_sources": ["VIP_001", "VIP_006", "CAT_001"],
+      "category": "层级冲突",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q002",
+      "question": "我是金卡会员，一件大衣穿了 20 天后发现质量问题，还能退吗？",
+      "ground_truth": "可以退。金卡会员享 30 天无理由退货，20 天仍在时效内；且质量问题受理期为签收后 30 天，也符合条件。",
+      "expected_sources": ["VIP_001", "QUALITY_004"],
+      "category": "层级冲突",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q003",
+      "question": "黑卡会员定制了一件衣服，已经进入生产了，能退吗？",
+      "ground_truth": "不能退。VIP 权益不豁免定制商品「进入生产后不可退」的规则，定制商品下单 24 小时后进入生产即不支持任何理由退换。",
+      "expected_sources": ["VIP_006", "CAT_003"],
+      "category": "层级冲突",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q004",
+      "question": "我是银卡会员，退货不是质量问题，需要自己出运费吗？",
+      "ground_truth": "不需要承担运费。银卡及以上会员退换货免运费。",
+      "expected_sources": ["VIP_003", "RETURN_007"],
+      "category": "层级冲突",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q005",
+      "question": "普通会员和银卡会员的无理由退货时效分别是多少天？",
+      "ground_truth": "普通会员 7 天，银卡会员 15 天无理由退货，均从签收次日起算。",
+      "expected_sources": ["VIP_001"],
+      "category": "层级冲突",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q006",
+      "question": "黑卡会员能退跨境商品吗？",
+      "ground_truth": "不能。VIP 权益不豁免跨境商品「不支持无理由退货」的规则，跨境商品仅支持质量问题退货。",
+      "expected_sources": ["VIP_006", "FAQ_008"],
+      "category": "层级冲突",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q007",
+      "question": "极速退款是所有会员都能用吗？额度和次数有什么限制？",
+      "ground_truth": "不是，仅金卡及以上会员可用。单笔不超过 2000 元，每月不超过 3 次；超过 2000 元需验货后退款。",
+      "expected_sources": ["VIP_002", "FAQ_018"],
+      "category": "量化细节",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q008",
+      "question": "7 天无理由退货从哪天开始算？1 月 1 日签收的话最晚哪天申请？",
+      "ground_truth": "从签收次日起算 7 天自然日，签收当日不计入。1 月 1 日签收，最晚 1 月 8 日 23:59 前可申请。",
+      "expected_sources": ["RETURN_001", "FAQ_015"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q009",
+      "question": "质量问题退货有期限限制吗？",
+      "ground_truth": "有，受理期为签收后 30 天内；超过 30 天但能提供品牌官方售后凭证的可协商处理。",
+      "expected_sources": ["QUALITY_004", "FAQ_016"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q010",
+      "question": "质量问题退货运费平台报销的上限是多少？",
+      "ground_truth": "买家先行垫付的凭有效运单报销，单笔上限 15 元，超出部分需与客服协商。",
+      "expected_sources": ["RETURN_007"],
+      "category": "量化细节",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q011",
+      "question": "偏远地区的包邮门槛是多少？",
+      "ground_truth": "新疆、西藏、青海满 199 元包邮，不满收取 12 元运费；其他地区满 99 元包邮，不满收取 6 元运费。",
+      "expected_sources": ["SHIP_002", "FAQ_019"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q012",
+      "question": "退货退款一般多久能到账？",
+      "ground_truth": "原支付渠道退回 3-5 个工作日；平台余额即时到账；金卡及以上会员极速退款审核通过后立即到账。",
+      "expected_sources": ["RETURN_003", "FAQ_001"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q013",
+      "question": "30 天内退货超过几单会被限制退货权益？",
+      "ground_truth": "30 天内退货超过 5 单，系统可能限制无理由退货权益，转为人工审核。",
+      "expected_sources": ["RETURN_006"],
+      "category": "量化细节",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q014",
+      "question": "商品降价了能退差价吗？价保期多久？",
+      "ground_truth": "签收后 7 天内可申请价保退差价；大促限时活动价、秒杀价、优惠券抵扣价、跨境商品、定制商品不适用价保，超过 7 天也不支持。",
+      "expected_sources": ["RETURN_008", "FAQ_007"],
+      "category": "量化细节",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q015",
+      "question": "物流多少小时没有更新可以联系客服催查？",
+      "ground_truth": "物流超过 72 小时无更新，可联系客服催查。",
+      "expected_sources": ["SHIP_006"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q016",
+      "question": "普通地区买满多少钱包邮？不满收多少运费？",
+      "ground_truth": "单笔订单满 99 元包邮，不满 99 元收取 6 元运费。",
+      "expected_sources": ["SHIP_002"],
+      "category": "量化细节",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q017",
+      "question": "内衣试穿了一次，还能退吗？",
+      "ground_truth": "不能退。贴身衣物（内衣、内裤、泳衣、保暖内衣、塑身衣）一旦拆封、试穿或水洗，概不退换。",
+      "expected_sources": ["CAT_001", "FAQ_011"],
+      "category": "品类边界",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q018",
+      "question": "泳衣把下装的卫生贴撕了，还能退吗？",
+      "ground_truth": "不能退。泳衣下装拆除卫生贴属于拆封情形，贴身衣物一旦拆封、试穿即概不退换。",
+      "expected_sources": ["CAT_001"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q019",
+      "question": "鞋子在家试穿把鞋底磨了，鞋盒还完好，能退吗？",
+      "ground_truth": "不能退。鞋靴类仅限室内干净地面试穿，鞋底不得有磨损、污渍，鞋底有磨损即不符合退货条件。",
+      "expected_sources": ["CAT_002"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q020",
+      "question": "连裤袜拆了封但没穿过，能退吗？",
+      "ground_truth": "不能退。连裤袜属一次性卫生用品，一经拆封即不可退，即使未上身。",
+      "expected_sources": ["CAT_005"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q021",
+      "question": "耳钉拆封了还能退吗？",
+      "ground_truth": "不能退。耳饰涉及卫生安全，拆封后不支持退换。",
+      "expected_sources": ["CAT_008"],
+      "category": "品类边界",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q022",
+      "question": "定制商品下单 48 小时后尺码不合适，能退吗？",
+      "ground_truth": "不能退。定制商品下单后 24 小时内可取消订单，24 小时后进入生产即不支持任何理由退换，除非平台制作错误。",
+      "expected_sources": ["CAT_003", "FAQ_013"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q023",
+      "question": "针织围巾拆封了能退吗？",
+      "ground_truth": "不能退。直接接触皮肤的针织围巾，拆封后不退换，同贴身衣物规则。",
+      "expected_sources": ["CAT_004"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q024",
+      "question": "羊绒衫第一次穿就起球了，算质量问题吗？",
+      "ground_truth": "不算质量问题。羊绒首次穿着轻微起球属正常现象，可自行修剪；大面积起球才属质量问题。",
+      "expected_sources": ["CAT_007", "QUALITY_005"],
+      "category": "品类边界",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q025",
+      "question": "限量联名款没有质量问题，能退吗？",
+      "ground_truth": "不能退。限量联名款无质量问题不支持退换。",
+      "expected_sources": ["CAT_009"],
+      "category": "品类边界",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q026",
+      "question": "洗过的衣服还能退吗？",
+      "ground_truth": "不能退。已洗涤的商品会被判定为影响二次销售，无法办理无理由退货。",
+      "expected_sources": ["FAQ_014", "RETURN_005"],
+      "category": "抗幻觉",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q027",
+      "question": "退货的时候忘了放吊牌，怎么办？",
+      "ground_truth": "验货时发现吊牌缺失，可能判定为影响二次销售，退回商品并关闭退款申请；建议补寄吊牌后重新申请。",
+      "expected_sources": ["FAQ_002", "RETURN_004"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q028",
+      "question": "真皮鞋子有褶皱和色差，是质量问题吗？",
+      "ground_truth": "不是质量问题。真皮类商品存在天然纹理、褶皱、色差，属正常现象，不构成质量问题。",
+      "expected_sources": ["CAT_002", "CAT_007"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q029",
+      "question": "羽绒服收到时压得很瘪，是质量问题吗？",
+      "ground_truth": "不是质量问题。羽绒服运输压缩后未及时回弹属正常现象，拍打或静置后可恢复。",
+      "expected_sources": ["CAT_006"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q030",
+      "question": "深色衣服第一次洗轻微掉色，算质量问题吗？",
+      "ground_truth": "不算质量问题。深色衣物首次洗涤轻微浮色属正常现象。",
+      "expected_sources": ["QUALITY_005"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q031",
+      "question": "新鞋有皮革胶水味，能算质量问题退货吗？",
+      "ground_truth": "不构成质量问题。新鞋的皮革或胶水气味属正常现象，不构成质量问题。",
+      "expected_sources": ["CAT_002"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q032",
+      "question": "帽子上沾了粉底渍，还能退吗？",
+      "ground_truth": "不能退。帽子有粉底渍、汗渍或发型压痕的，视为使用，不支持退换。",
+      "expected_sources": ["CAT_004"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q033",
+      "question": "羽绒服的毛领掉毛，算质量问题吗？",
+      "ground_truth": "不算质量问题。天然皮毛材质的轻微掉毛、蓬松度变化属正常现象，不构成质量问题。",
+      "expected_sources": ["CAT_006", "QUALITY_005"],
+      "category": "抗幻觉",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q034",
+      "question": "换货之后还能再退货吗？",
+      "ground_truth": "换货后的新商品不再支持 7 天无理由退货，仅质量问题可再退，质量受理期为 30 天。",
+      "expected_sources": ["RETURN_002", "FAQ_003"],
+      "category": "基础事实",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q035",
+      "question": "退货的时候可以换成不同款式吗？",
+      "ground_truth": "不可以。退货和换货是两个独立流程，如需换不同款式，请先退货再重新下单。",
+      "expected_sources": ["FAQ_006", "RETURN_002"],
+      "category": "基础事实",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q036",
+      "question": "拒收包裹需要另外申请退货吗？",
+      "ground_truth": "不需要。拒收后物流退回仓库，验货无误后自动退款，无需手动申请。",
+      "expected_sources": ["SHIP_005", "FAQ_005"],
+      "category": "基础事实",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q037",
+      "question": "退货成功后，用掉的优惠券和积分会返还吗？",
+      "ground_truth": "会返还。优惠券和积分原路返还，有效期不变；已过期优惠券不予返还。",
+      "expected_sources": ["FAQ_004"],
+      "category": "基础事实",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q038",
+      "question": "包裹显示签收了但我没收到，怎么办？",
+      "ground_truth": "48 小时内联系客服核实，超期将难以追溯。",
+      "expected_sources": ["SHIP_003", "FAQ_020"],
+      "category": "基础事实",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q039",
+      "question": "海外购买的商品怎么退货？",
+      "ground_truth": "跨境商品不支持 7 天无理由退货，仅支持质量问题退货，且需承担国际退货运费。",
+      "expected_sources": ["FAQ_008"],
+      "category": "基础事实",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q040",
+      "question": "商品发货之后还能改收货地址吗？",
+      "ground_truth": "发货后联系客服尝试拦截，拦截成功可修改地址；拦截失败需拒收后重新下单，产生的费用由买家承担。",
+      "expected_sources": ["SHIP_004"],
+      "category": "基础事实",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q041",
+      "question": "金卡会员买了一件真丝衬衫，穿了 10 天发现勾丝了，能退吗？",
+      "ground_truth": "可以退。真丝勾丝、抽丝属质量问题，质量问题受理期为签收后 30 天，10 天仍在受理期内；且金卡会员本身享 30 天无理由退货。",
+      "expected_sources": ["CAT_007", "QUALITY_001", "QUALITY_004", "VIP_001"],
+      "category": "多跳综合",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q042",
+      "question": "衣服的吊牌剪掉了，还能申请无理由退货吗？",
+      "ground_truth": "不能退。吊牌剪除会被判定为影响二次销售，平台有权拒绝退款。",
+      "expected_sources": ["RETURN_005"],
+      "category": "多跳综合",
+      "difficulty": "easy"
+    },
+    {
+      "id": "Q043",
+      "question": "一个订单里多件商品一起退，运费怎么算？",
+      "ground_truth": "同一订单多件商品一起退回，按一次运费计算；非质量问题买家承担，质量问题平台承担。",
+      "expected_sources": ["FAQ_009", "RETURN_007"],
+      "category": "多跳综合",
+      "difficulty": "medium"
+    },
+    {
+      "id": "Q044",
+      "question": "质量问题退货和无理由退货有什么区别？",
+      "ground_truth": "四点区别：受理期不同，质量 30 天、无理由 7 天；运费承担不同，质量平台承担、无理由买家承担；状态要求不同，质量不以吊牌包装完整为前提、无理由要求完整；举证要求不同，质量需照片视频等凭证、无理由无需举证。",
+      "expected_sources": ["QUALITY_006"],
+      "category": "多跳综合",
+      "difficulty": "hard"
+    },
+    {
+      "id": "Q045",
+      "question": "预售商品还没发货，现在不想要了能退款吗？",
+      "ground_truth": "可以。预售商品发货前可随时申请退款，发货后按通用退换货政策执行。",
+      "expected_sources": ["CAT_003"],
+      "category": "多跳综合",
+      "difficulty": "easy"
+    }
+  ]
+}

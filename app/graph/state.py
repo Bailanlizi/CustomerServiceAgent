@@ -23,10 +23,6 @@ class AgentState(TypedDict):
     # v4.0 新增：会话 ID
     thread_id: str
     
-    # v4.0 新增：审核状态
-    audit_required: bool  # 是否需要人工审核
-    audit_log_id: Optional[int]  # 审计日志ID
-    
     # v4.0 新增：结构化消息列表
     messages:  Annotated[List[BaseMessage], operator.add]
     

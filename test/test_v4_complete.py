@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.core.database import init_db
 from app.graph.workflow import compile_app_graph
 from app.core.security import create_access_token
-from app.models.audit import AuditLog, AuditAction
 from app.models.refund import RefundApplication, RefundStatus
 from app.core.database import async_session_maker
 from langchain_core.messages import HumanMessage
@@ -67,8 +66,6 @@ async def test_v4():
             "context": [],
             "order_data": None,
             "intent": None,
-            "audit_required": False,
-            "audit_log_id": None,
             "messages": [HumanMessage(content=case["query"])],
             "answer":  ""
         }
@@ -86,49 +83,11 @@ async def test_v4():
             # 输出结果
             print(f"\n 结果分析:")
             print(f"  意图: {final_state.get('intent', 'N/A')}")
-            print(f"  需要审核: {final_state.get('audit_required', False)}")
-            
-            if final_state.get('audit_required'):
-                audit_log_id = final_state.get('audit_log_id')
-                print(f"  审计日志ID: {audit_log_id}")
-                
-                # 查询审计日志
-                async with async_session_maker() as session:
-                    result = await session.execute(
-                        select(AuditLog).where(AuditLog.id == audit_log_id)
-                    )
-                    audit_log = result.scalar_one_or_none()
-                    
-                    if audit_log: 
-                        print(f"  风险等级: {audit_log.risk_level}")
-                        print(f"  触发原因: {audit_log.trigger_reason}")
-                        print(f"  审核状态: {audit_log.action}")
             
             print(f"\n Agent 回答:")
             print(f"  {final_state.get('answer', 'N/A')}")
             
-            # 验证逻辑
-            if i == 1:
-                # 场景1: 低额退款应自动通过
-                assert not final_state.get('audit_required', False), "不应触发审核"
-                print("\n 测试通过:  低额退款自动通过")
-                
-            elif i == 2:
-                # 场景2: 高额退款应触发审核
-                assert final_state.get('audit_required', False), "应触发审核"
-                assert final_state.get('audit_log_id') is not None, "应生成审计日志"
-                print("\n 测试通过: 高额退款触发人工审核")
-                
-                # 模拟管理员批准
-                print("\n 模拟管理员批准...")
-                async with async_session_maker() as session:
-                    audit_log = await session.get(AuditLog, final_state['audit_log_id'])
-                    audit_log.action = AuditAction.APPROVE
-                    audit_log.admin_id = 999
-                    audit_log.admin_comment = "测试批准"
-                    session.add(audit_log)
-                    await session.commit()
-                    print(" 管理员已批准")
+            assert final_state.get("answer"), "Agent 应返回非空回复"
                 
         except AssertionError as e:
             print(f"\n 测试失败: {e}")

@@ -18,7 +18,7 @@ from sqlmodel import select
 from app.core.config import settings
 from app.models.audit import AuditAction, AuditLog, RiskLevel
 from app.models.refund import RefundStatus
-from app.tasks.refund_tasks import notify_admin_audit
+from app.tasks.refund_tasks import notify_admin_audit, process_refund_payment
 from app.websocket.manager import manager
 from datetime import datetime, timezone
 
@@ -145,6 +145,11 @@ async def submit_refund_application(
                 refund_app.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 session.add(refund_app)
                 await session.commit()
+                process_refund_payment.delay(
+                    refund_id=refund_app.id,
+                    amount=refund_amount,
+                    payment_method="原支付方式",
+                )
                 return (
                     f"✅ 退货申请已自动审核通过。\n"
                     f"申请编号：#{refund_app.id}\n退款金额：¥{refund_amount}\n"

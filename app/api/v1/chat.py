@@ -49,6 +49,8 @@ async def chat(
         }
 
         try:
+            token_sent = False
+            fallback_answer = ""
             async for event in app_graph.astream_events(
                 initial_state, config, version="v2"
             ):
@@ -64,6 +66,18 @@ async def chat(
                             if content:
                                 payload = json.dumps({"token": content}, ensure_ascii=False)
                                 yield f"data: {payload}\n\n"
+                                token_sent = True
+
+                # astream 正常会发送 on_chat_model_stream；保留节点结果兜底，
+                # 兼容不发送 token 事件的 OpenAI 兼容网关。
+                elif kind == "on_chain_end" and event.get("name") in {"generate", "refund_agent"}:
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict) and output.get("answer"):
+                        fallback_answer = output["answer"]
+
+            if fallback_answer and not token_sent:
+                payload = json.dumps({"token": fallback_answer}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
 
             yield "data: [DONE]\n\n"
             

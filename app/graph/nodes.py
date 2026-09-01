@@ -213,9 +213,11 @@ async def generate(state: AgentState) -> dict:
         HumanMessage(content=user_content)
     ]
     
-    response = await llm.ainvoke(messages)
-    
-    return {"answer": response.content}
+    response = None
+    async for chunk in llm.astream(messages):
+        response = chunk if response is None else response + chunk
+
+    return {"answer": response.content if response else ""}
 
 
 # 意图识别的 System Prompt
@@ -324,9 +326,14 @@ async def refund_agent(state: AgentState) -> dict:
     if not messages:
         messages = [HumanMessage(content=state["question"])]
 
-    response = await llm.bind_tools(refund_tools).ainvoke(
+    response = None
+    async for chunk in llm.bind_tools(refund_tools).astream(
         [SystemMessage(content=REFUND_AGENT_PROMPT), *messages]
-    )
+    ):
+        response = chunk if response is None else response + chunk
+
+    if response is None:
+        return {"answer": "抱歉，暂时无法处理退款请求，请稍后重试。"}
     result: dict = {"messages": [response]}
     if not response.tool_calls:
         result["answer"] = response.content
