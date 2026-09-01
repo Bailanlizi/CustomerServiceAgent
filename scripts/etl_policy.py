@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.knowledge import KnowledgeChunk
+from app.services.policy_chunks import load_policy_documents
 
 # ================= 配置区 =================
 BATCH_SIZE = 50  # 每次向 Embedding API 发送的片段数量（防止 API 超时）
@@ -49,9 +50,12 @@ async def process_file(file_path: str, source_name: str):
     
     try:
         # --- Step 1: 加载 ---
-        loader = get_loader(file_path)
-        # load() 是同步的，如果文件巨大建议用 lazy_load()，这里简单起见用 load
-        docs = loader.load()
+        if file_path.lower().endswith(".md"):
+            # 政策 Markdown 以条款标题为边界，确保评估可精确追踪命中条款。
+            docs = load_policy_documents(file_path)
+        else:
+            loader = get_loader(file_path)
+            docs = loader.load()
         
         # --- Step 2: 切片 ---
         text_splitter = RecursiveCharacterTextSplitter(
@@ -98,9 +102,12 @@ async def process_file(file_path: str, source_name: str):
                 batch_metas = []
                 for idx in valid_indices:
                     doc = batch_docs[idx]
-                    page = doc.metadata.get("page", 0) + 1 
-                    # chunk_index 依然基于全局的 i + idx
-                    batch_metas.append({"page": page, "chunk_index": i + idx})
+                    page = doc.metadata.get("page", 0) + 1
+                    batch_metas.append({
+                        **doc.metadata,
+                        "page": page,
+                        "chunk_index": i + idx,
+                    })
 
                 print(f"  🧠 Embedding 批次 {i // BATCH_SIZE + 1} (有效片段: {len(batch_texts)})...")
                 

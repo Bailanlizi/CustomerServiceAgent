@@ -335,7 +335,7 @@
       "id": "Q041",
       "question": "金卡会员买了一件真丝衬衫，穿了 10 天发现勾丝了，能退吗？",
       "ground_truth": "可以退。真丝勾丝、抽丝属质量问题，质量问题受理期为签收后 30 天，10 天仍在受理期内；且金卡会员本身享 30 天无理由退货。",
-      "expected_sources": ["CAT_007", "QUALITY_001", "QUALITY_004", "VIP_001"],
+      "expected_sources": ["CAT_007", "QUALITY_004", "VIP_001"],
       "category": "多跳综合",
       "difficulty": "hard"
     },

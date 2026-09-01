@@ -1,7 +1,5 @@
 # app/graph/nodes.py
-import httpx
 from typing import List, Literal
-from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -14,71 +12,17 @@ from sqlmodel import select
 from pydantic import BaseModel, SecretStr
 from langchain_core.messages import AIMessage, BaseMessage
 from app.graph.tools import refund_tools
+from app.services.policy_retrieval import QwenEmbeddings, embedding_model, retrieve_policy
 
 
 # 相似度阈值：只有距离 < 0.5 才认为相关
 SIMILARITY_THRESHOLD = 0.5
 
 # ==========================================
-# 自定义通义千问 Embedding 适配器
-# ==========================================
-class QwenEmbeddings(Embeddings):
-    """通义千问 Embedding API 适配器"""
-    
-    def __init__(self, base_url: str, api_key: str, model: str, dimensions: int):
-        self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
-        self.model = model
-        self.dimensions = dimensions
-    
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """同步方法（不实现）"""
-        raise NotImplementedError("请使用异步方法 aembed_documents")
-    
-    def embed_query(self, text: str) -> List[float]:
-        """同步方法（不实现）"""
-        raise NotImplementedError("请使用异步方法 aembed_query")
-    
-    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
-        """批量生成 Embedding"""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model":  self.model,
-                    "input": texts,  # 通义千问使用 input 参数
-                    "dimensions": self.dimensions
-                },
-                timeout=30.0
-            )
-            response.raise_for_status()
-            data = response.json()
-            # 通义千问返回格式:  {"data": [{"embedding": [... ], "index": 0}]}
-            return [item["embedding"] for item in data["data"]]
-    
-    async def aembed_query(self, text:  str) -> List[float]:
-        """单条文本生成 Embedding"""
-        results = await self.aembed_documents([text])
-        return results[0]
-
-
-# ==========================================
 # 全局组件初始化
 # ==========================================
 
-# 1. Embedding 模型（使用自定义适配器）
-embedding_model = QwenEmbeddings(
-    base_url=settings.OPENAI_BASE_URL,
-    api_key=settings.OPENAI_API_KEY,
-    model=settings.EMBEDDING_MODEL,
-    dimensions=settings.EMBEDDING_DIM
-)
-
-# 2. LLM 模型 (用于生成回答)
+# 1. LLM 模型 (用于生成回答)
 llm = ChatOpenAI(
     base_url=settings.OPENAI_BASE_URL,
     api_key=SecretStr(settings.OPENAI_API_KEY),
@@ -86,7 +30,7 @@ llm = ChatOpenAI(
     temperature=0 
 )
 
-# 3. Prompt 模板
+# 2. Prompt 模板
 PROMPT_TEMPLATE = """
 你是一个专业的电商政策咨询专家。请基于以下检索到的 context 回答用户的问题。
 
@@ -115,31 +59,10 @@ async def retrieve(state: AgentState) -> dict:
     question = state["question"]
     print(f"🔍 [Retrieve] 正在检索: {question}")
 
-    # 生成查询向量
-    query_vector = await embedding_model.aembed_query(question)
-
-    async with async_session_maker() as session:
-        # 查询最相似的 chunk
-        distance_col = KnowledgeChunk.embedding.cosine_distance(query_vector).label("distance") # type: ignore
-        
-        stmt = (
-            select(KnowledgeChunk, distance_col)
-            .where(KnowledgeChunk.is_active) # type: ignore
-            .order_by(distance_col)
-            .limit(5)
-        )
-        result = await session.exec(stmt)
-        results = result.all() 
-
-    # 硬逻辑过滤
-    valid_chunks = []
-    for chunk, distance in results:
-        print(f"   - 内容片段: {chunk.content[: 10]}...  | 距离分:  {distance:.4f}")
-        
-        if distance < SIMILARITY_THRESHOLD: 
-            valid_chunks.append(chunk.content)
-        else:
-            print(f"    距离过大，已丢弃")
+    retrieved = await retrieve_policy(question, similarity_threshold=SIMILARITY_THRESHOLD)
+    valid_chunks = [chunk.content for chunk in retrieved]
+    for chunk in retrieved:
+        print(f"   - {chunk.clause_ids or ['未标注条款']}: {chunk.content[:10]}... | 距离分: {chunk.distance:.4f}")
 
     print(f" [Retrieve] 最终有效记录: {len(valid_chunks)} 条")
     return {"context": valid_chunks}
