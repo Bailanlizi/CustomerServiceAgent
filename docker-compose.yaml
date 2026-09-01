@@ -11,7 +11,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
       POSTGRES_DB: ${POSTGRES_DB:-knowledge_base}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +22,7 @@ services:
 
   # 会话记忆缓存：Redis
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:latest
     container_name: ecommerce_redis
     ports:
       - "6379:6379"
@@ -40,7 +40,7 @@ services:
     container_name: ecommerce_celery_worker
     command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -E
     depends_on:
-      postgres: 
+      db: 
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -58,7 +58,7 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
+      db:
         condition: service_healthy
       redis:
         condition:  service_healthy
