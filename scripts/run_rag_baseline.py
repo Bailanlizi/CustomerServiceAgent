@@ -11,10 +11,12 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.evaluation.metrics import aggregate_by, aggregate_metrics, clause_metrics
+from app.evaluation.metrics import (
+    aggregate_by, aggregate_metrics, answer_clause_metrics, clause_metrics, cosine_similarity,
+)
 from app.core.config import settings
 from app.graph.nodes import GENERATE_SYSTEM_PROMPT, llm
-from app.services.policy_retrieval import load_oracle_contexts, retrieve_policy
+from app.services.policy_retrieval import embedding_model, load_oracle_contexts, retrieve_policy
 
 
 def serialize_context(context) -> dict:
@@ -37,6 +39,15 @@ async def generate_answer(question: str, contexts: list[dict]) -> str:
         HumanMessage(content=f"[参考信息]：\n{evidence}\n\n[用户问题]：\n{question}"),
     ])
     return str(response.content)
+
+
+async def answer_semantic_similarity(answer: str, ground_truth: str) -> float | None:
+    try:
+        answer_vector, reference_vector = await embedding_model.aembed_documents([answer, ground_truth])
+        return cosine_similarity(answer_vector, reference_vector)
+    except Exception:
+        # 语义相似度是补充指标，单独失败不应丢弃该题主评测产物。
+        return None
 
 
 def checkpoint_path(output: Path) -> Path:
@@ -89,11 +100,14 @@ async def main(use_oracle: bool, output: Path, limit: int | None = None, concurr
                 )
                 contexts = [serialize_context(context) for context in retrieved]
                 answer = await generate_answer(item["question"], contexts)
+                semantic_similarity = await answer_semantic_similarity(answer, item["ground_truth"])
             result = {
                 **item,
                 "retrieved_contexts": contexts,
                 "answer": answer,
                 "retrieval_metrics": clause_metrics(item["expected_sources"], contexts, k=5),
+                "answer_clause_metrics": answer_clause_metrics(answer, item["expected_sources"]),
+                "answer_semantic_similarity": semantic_similarity,
                 "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds(),
             }
             await checkpoint_result({"status": "ok", "id": item["id"], "item": result})

@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "qwen-plus"
     EMBEDDING_MODEL: str = "text-embedding-v3"
     EMBEDDING_DIM: int = 1024
+    # 离线评估 judge。必须显式配置为不同于业务生成模型的模型。
+    JUDGE_OPENAI_BASE_URL: str | None = None
+    JUDGE_OPENAI_API_KEY: str | None = None
+    JUDGE_LLM_MODEL: str | None = None
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True)
 
     # === 安全配置 ===

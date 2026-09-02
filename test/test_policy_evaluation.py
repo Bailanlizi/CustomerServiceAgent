@@ -1,4 +1,4 @@
-from app.evaluation.metrics import aggregate_metrics, clause_metrics
+from app.evaluation.metrics import answer_clause_metrics, aggregate_metrics, clause_metrics
 from app.services.policy_chunks import load_policy_documents
 
 
@@ -42,3 +42,22 @@ def test_clause_metrics_preserve_raw_rank_and_do_not_double_count_duplicate_chun
 
     assert metrics["mrr@5"] == 1 / 2
     assert 0 < metrics["ndcg@5"] < 1.0
+
+
+def test_answer_clause_metrics_keep_unexpected_citations_as_review_signal():
+    metrics = answer_clause_metrics("依据 VIP_001、FAQ_016 和 RETURN_004。", ["VIP_001", "QUALITY_004"])
+
+    assert metrics["answer_primary_source_hit"] is True
+    assert metrics["answer_expected_source_recall"] == 0.5
+    assert metrics["answer_unexpected_sources"] == ["FAQ_016", "RETURN_004"]
+
+
+def test_chinese_ragas_prompts_include_domain_few_shot_examples():
+    from scripts.evaluate_ragas import _require_ragas
+    _require_ragas()  # 安装 RAGAS 的兼容层后再导入内部 prompt 类型。
+    from app.evaluation.chinese_ragas_prompts import ChineseNLIStatementPrompt
+
+    prompt = ChineseNLIStatementPrompt().to_string()
+    assert "CAT_001" in prompt
+    assert "48 小时" in prompt
+    assert "JSON Schema" in prompt

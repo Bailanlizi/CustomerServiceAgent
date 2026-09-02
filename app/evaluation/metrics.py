@@ -1,7 +1,11 @@
 """不依赖 LLM 的条款级检索指标。"""
 from collections.abc import Iterable
 from math import log2
+import re
 from statistics import mean
+
+
+CLAUSE_ID_PATTERN = re.compile(r"\b(?:RETURN|CAT|QUALITY|VIP|SHIP|FAQ)_\d{3}\b")
 
 
 def retrieved_clause_ids(contexts: Iterable[dict]) -> list[str]:
@@ -51,3 +55,22 @@ def aggregate_by(items: Iterable[dict], group_key: str, *, k: int) -> dict[str, 
     for item in items:
         groups.setdefault(item[group_key], []).append(item)
     return {group: aggregate_metrics(group_items, k=k) for group, group_items in groups.items()}
+
+
+def answer_clause_metrics(answer: str, expected_sources: list[str]) -> dict:
+    """衡量回答对权威条款的引用；unexpected 仅供审查，不直接视为事实错误。"""
+    cited = sorted(set(CLAUSE_ID_PATTERN.findall(answer)))
+    expected = set(expected_sources)
+    matched = sorted(set(cited) & expected)
+    return {
+        "cited_sources": cited,
+        "answer_primary_source_hit": bool(expected_sources and expected_sources[0] in cited),
+        "answer_expected_source_recall": len(matched) / len(expected) if expected else 0.0,
+        "answer_expected_source_precision": len(matched) / len(cited) if cited else 0.0,
+        "answer_unexpected_sources": sorted(set(cited) - expected),
+    }
+
+
+def cosine_similarity(first: list[float], second: list[float]) -> float | None:
+    denominator = sum(value * value for value in first) ** 0.5 * sum(value * value for value in second) ** 0.5
+    return sum(left * right for left, right in zip(first, second)) / denominator if denominator else None

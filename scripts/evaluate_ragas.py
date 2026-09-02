@@ -1,6 +1,7 @@
 """对 baseline/oracle 运行产物执行 RAGAS 0.4+ 自动评估。"""
 import argparse
 import json
+from math import isnan
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -31,31 +32,17 @@ def _install_vertexai_import_compatibility() -> None:
 def _require_ragas():
     try:
         from ragas import EvaluationDataset, SingleTurnSample, evaluate
-        from ragas.embeddings import LangchainEmbeddingsWrapper
         from ragas.llms import LangchainLLMWrapper
-        from ragas.metrics import (
-            ContextRelevance,
-            Faithfulness,
-            FactualCorrectness,
-            LLMContextPrecisionWithReference,
-            LLMContextRecall,
-            ResponseRelevancy,
-        )
+        from ragas.metrics import Faithfulness, FactualCorrectness
+        from ragas.run_config import RunConfig
     except ModuleNotFoundError as exc:
         if exc.name not in {"langchain_community.chat_models.vertexai"}:
             raise
         _install_vertexai_import_compatibility()
         from ragas import EvaluationDataset, SingleTurnSample, evaluate
-        from ragas.embeddings import LangchainEmbeddingsWrapper
         from ragas.llms import LangchainLLMWrapper
-        from ragas.metrics import (
-            ContextRelevance,
-            Faithfulness,
-            FactualCorrectness,
-            LLMContextPrecisionWithReference,
-            LLMContextRecall,
-            ResponseRelevancy,
-        )
+        from ragas.metrics import Faithfulness, FactualCorrectness
+        from ragas.run_config import RunConfig
     except ImportError as exc:
         raise RuntimeError(
             "未安装 RAGAS。请先运行 `uv sync --group dev`，再执行本脚本。"
@@ -65,54 +52,78 @@ def _require_ragas():
         "SingleTurnSample": SingleTurnSample,
         "evaluate": evaluate,
         "LangchainLLMWrapper": LangchainLLMWrapper,
-        "LangchainEmbeddingsWrapper": LangchainEmbeddingsWrapper,
-        "metrics": [
-            LLMContextPrecisionWithReference(),
-            LLMContextRecall(),
-            ContextRelevance(),
-            Faithfulness(),
-            ResponseRelevancy(),
-            FactualCorrectness(),
-        ],
+        "Faithfulness": Faithfulness,
+        "FactualCorrectness": FactualCorrectness,
+        "RunConfig": RunConfig,
     }
 
 
-def main(input_path: Path, output_path: Path) -> None:
+def main(input_path: Path, output_path: Path, limit: int | None, max_workers: int) -> None:
     ragas = _require_ragas()
-    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+    from app.evaluation.chinese_ragas_prompts import (
+        ChineseClaimDecompositionPrompt, ChineseNLIStatementPrompt, ChineseStatementGeneratorPrompt,
+    )
+    from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
     from app.core.config import settings
 
+    if not settings.JUDGE_LLM_MODEL or not settings.JUDGE_OPENAI_API_KEY:
+        raise RuntimeError("请在 .env 配置 JUDGE_LLM_MODEL 与 JUDGE_OPENAI_API_KEY，再运行 RAGAS 评估。")
+    if settings.JUDGE_LLM_MODEL == settings.LLM_MODEL:
+        raise RuntimeError("JUDGE_LLM_MODEL 必须与 LLM_MODEL 不同，避免业务模型自评。")
+
     run = json.loads(input_path.read_text(encoding="utf-8"))
+    run_items = run["items"][:limit] if limit else run["items"]
     samples = [ragas["SingleTurnSample"](
         user_input=item["question"],
         retrieved_contexts=[context["content"] for context in item["retrieved_contexts"]],
         response=item["answer"],
         reference=item["ground_truth"],
-    ) for item in run["items"]]
+    ) for item in run_items]
     dataset = ragas["EvaluationDataset"](samples=samples)
 
     judge_llm = ChatOpenAI(
-        base_url=settings.OPENAI_BASE_URL,
-        api_key=SecretStr(settings.OPENAI_API_KEY),
-        model=settings.LLM_MODEL,
+        base_url=settings.JUDGE_OPENAI_BASE_URL or settings.OPENAI_BASE_URL,
+        api_key=SecretStr(settings.JUDGE_OPENAI_API_KEY),
+        model=settings.JUDGE_LLM_MODEL,
         temperature=0,
     )
-    judge_embeddings = OpenAIEmbeddings(
-        base_url=settings.OPENAI_BASE_URL,
-        api_key=SecretStr(settings.OPENAI_API_KEY),
-        model=settings.EMBEDDING_MODEL,
-        check_embedding_ctx_length=False,
-    )
+    metrics = [
+        ragas["Faithfulness"](
+            statement_generator_prompt=ChineseStatementGeneratorPrompt(),
+            nli_statements_prompt=ChineseNLIStatementPrompt(),
+            max_retries=2,
+        ),
+        ragas["FactualCorrectness"](
+            mode="precision",
+            claim_decomposition_prompt=ChineseClaimDecompositionPrompt(),
+            nli_prompt=ChineseNLIStatementPrompt(),
+        ),
+    ]
+    run_config = ragas["RunConfig"](timeout=120, max_retries=3, max_workers=max_workers)
     result = ragas["evaluate"](
         dataset=dataset,
-        metrics=ragas["metrics"],
+        metrics=metrics,
         llm=ragas["LangchainLLMWrapper"](judge_llm),
-        embeddings=ragas["LangchainEmbeddingsWrapper"](judge_embeddings),
+        run_config=run_config,
     )
     frame = result.to_pandas()
+    records = frame.to_dict(orient="records")
+    def is_missing(value) -> bool:
+        return value is None or (isinstance(value, float) and isnan(value))
+
+    null_counts = {column: sum(is_missing(row.get(column)) for row in records) for column in frame.columns}
+    report = {
+        "input": str(input_path),
+        "evaluated_count": len(records),
+        "judge": {"model": settings.JUDGE_LLM_MODEL, "base_url": settings.JUDGE_OPENAI_BASE_URL or settings.OPENAI_BASE_URL},
+        "metrics": [metric.name for metric in metrics],
+        "run_config": {"timeout": 120, "max_retries": 3, "max_workers": max_workers},
+        "null_counts": null_counts,
+        "items": records,
+    }
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_json(output_path, orient="records", force_ascii=False, indent=2)
+    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"RAGAS 结果已写入 {output_path}")
 
 
@@ -120,6 +131,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path, help="scripts/run_rag_baseline.py 生成的运行产物")
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--limit", type=int, default=None, help="先运行标定子集，例如 15")
+    parser.add_argument("--max-workers", type=int, default=2, help="judge 并发数，默认 2")
     args = parser.parse_args()
     default_output = args.input.with_name(f"{args.input.stem}.ragas.json")
-    main(args.input, args.output or default_output)
+    main(args.input, args.output or default_output, args.limit, args.max_workers)
