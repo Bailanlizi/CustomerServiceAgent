@@ -11,12 +11,25 @@ def retrieved_clause_ids(contexts: Iterable[dict]) -> list[str]:
 def clause_metrics(expected_sources: list[str], contexts: Iterable[dict], *, k: int) -> dict[str, float]:
     """计算主条款命中、覆盖率、MRR 与二值相关性的 nDCG。"""
     expected = set(expected_sources)
-    retrieved = retrieved_clause_ids(contexts)[:k]
+    ordered_contexts = sorted(contexts, key=lambda context: context.get("rank", float("inf")))
+    ranked_contexts = [
+        {**context, "rank": context.get("rank", index)}
+        for index, context in enumerate(ordered_contexts, 1)
+    ]
+    ranked_contexts = [context for context in ranked_contexts if context["rank"] <= k]
+    retrieved = retrieved_clause_ids(ranked_contexts)
     hits = [source for source in retrieved if source in expected]
-    primary_rank = next((index for index, source in enumerate(retrieved, 1) if source == expected_sources[0]), None)
+    primary_rank = next((context["rank"] for context in ranked_contexts
+                         if expected_sources[0] in context.get("clause_ids", [])), None)
 
-    dcg = sum((1.0 if source in expected else 0.0) / log2(index + 1)
-              for index, source in enumerate(retrieved, 1))
+    seen_relevant: set[str] = set()
+    dcg = 0.0
+    for context in ranked_contexts:
+        novel_relevant = (set(context.get("clause_ids", [])) & expected) - seen_relevant
+        if novel_relevant:
+            # 一个 chunk 最多贡献一次相关性，避免长条款多切片造成 nDCG > 1。
+            dcg += 1.0 / log2(context["rank"] + 1)
+            seen_relevant.update(novel_relevant)
     ideal_length = min(len(expected), k)
     idcg = sum(1.0 / log2(index + 1) for index in range(1, ideal_length + 1))
     return {
@@ -31,3 +44,10 @@ def clause_metrics(expected_sources: list[str], contexts: Iterable[dict], *, k: 
 def aggregate_metrics(items: Iterable[dict], *, k: int) -> dict[str, float]:
     rows = [clause_metrics(item["expected_sources"], item["retrieved_contexts"], k=k) for item in items]
     return {key: mean(row[key] for row in rows) for key in rows[0]} if rows else {}
+
+
+def aggregate_by(items: Iterable[dict], group_key: str, *, k: int) -> dict[str, dict[str, float]]:
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        groups.setdefault(item[group_key], []).append(item)
+    return {group: aggregate_metrics(group_items, k=k) for group, group_items in groups.items()}

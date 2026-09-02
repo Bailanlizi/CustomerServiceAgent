@@ -71,14 +71,15 @@ async def retrieve_policy(question: str, *, top_k: int = 5, similarity_threshold
         rows = result.all()
 
     retrieved: list[RetrievedPolicyChunk] = []
-    for chunk, distance in rows:
+    for raw_rank, (chunk, distance) in enumerate(rows, 1):
         if distance < similarity_threshold:
             metadata: dict[str, Any] = chunk.meta_data or {}
             retrieved.append(RetrievedPolicyChunk(
                 content=chunk.content,
                 source=chunk.source,
                 clause_ids=list(metadata.get("clause_ids", [])),
-                rank=len(retrieved) + 1,
+                # 保留数据库原始检索位次；阈值过滤不能改变 MRR/nDCG 的排名语义。
+                rank=raw_rank,
                 distance=float(distance),
             ))
     return retrieved

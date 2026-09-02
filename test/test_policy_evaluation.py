@@ -31,3 +31,14 @@ def test_aggregate_metrics_averages_per_question_results():
         {"expected_sources": ["B_001"], "retrieved_contexts": [{"clause_ids": ["X_001"]}]},
     ], k=5)
     assert summary["primary_hit@5"] == 0.5
+
+
+def test_clause_metrics_preserve_raw_rank_and_do_not_double_count_duplicate_chunks():
+    contexts = [
+        {"rank": 2, "clause_ids": ["CAT_001"]},
+        {"rank": 3, "clause_ids": ["CAT_001"]},
+    ]
+    metrics = clause_metrics(["CAT_001"], contexts, k=5)
+
+    assert metrics["mrr@5"] == 1 / 2
+    assert 0 < metrics["ndcg@5"] < 1.0

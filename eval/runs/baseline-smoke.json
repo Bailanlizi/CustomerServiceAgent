@@ -1,18 +1,47 @@
 {
   "run_type": "baseline",
-  "created_at": "2026-09-01T13:13:01.112409+00:00",
+  "created_at": "2026-09-01T14:11:28.923718+00:00",
   "dataset_name": "服装电商退货政策 RAG 评估测试集",
   "dataset_version": "1.0",
   "retrieval_config": {
     "top_k": 5,
     "similarity_threshold": 0.5
   },
+  "models": {
+    "llm": "qwen3.7-max-2026-06-08",
+    "embedding": "qwen3.7-text-embedding"
+  },
+  "packages": {
+    "langchain-openai": "1.6.0",
+    "ragas": "0.4.3"
+  },
+  "checkpoint": "eval\\runs\\baseline-smoke.jsonl",
+  "completed_count": 1,
+  "failed_count": 0,
   "summary": {
     "primary_hit@5": 1.0,
     "any_hit@5": 1.0,
     "clause_recall@5": 1.0,
     "mrr@5": 0.25,
     "ndcg@5": 0.9060254355346823
+  },
+  "summary_by_category": {
+    "层级冲突": {
+      "primary_hit@5": 1.0,
+      "any_hit@5": 1.0,
+      "clause_recall@5": 1.0,
+      "mrr@5": 0.25,
+      "ndcg@5": 0.9060254355346823
+    }
+  },
+  "summary_by_difficulty": {
+    "hard": {
+      "primary_hit@5": 1.0,
+      "any_hit@5": 1.0,
+      "clause_recall@5": 1.0,
+      "mrr@5": 0.25,
+      "ndcg@5": 0.9060254355346823
+    }
   },
   "items": [
     {
@@ -73,14 +102,15 @@
           "distance": 0.31356827535818244
         }
       ],
-      "answer": "您好！非常抱歉，试穿过的内衣是无法退货的哦。\n\n根据我们的相关政策规定：\n1. 根据《VIP 会员服务政策》（VIP_001、VIP_006），黑卡会员确实享有贴身衣物的退货权益，但前提是商品必须保持“**未使用、未洗涤**”的状态。\n2. 根据《特殊品类规则》（CAT_001）和《常见问题》（FAQ_011），贴身衣物出于卫生安全考虑，**一旦拆封、试穿或水洗，概不退换**。\n\n因为您的内衣已经试穿过，不符合“未使用”的退货条件，所以无法为您办理退货，还请您谅解。如果您还有其他疑问或需要帮助，请随时告诉我！",
+      "answer": "您好！很抱歉，试穿过的内衣是无法办理退货的。\n\n根据《特殊品类规则》（CAT_001）以及《VIP 会员服务政策》（VIP_001、VIP_006）的相关条款，虽然尊贵的黑卡会员享有贴身衣物可退的专属权益，但前提是商品必须严格保持“**未使用、未洗涤**”的状态。\n\n由于您的内衣已经试穿，出于卫生安全考虑，已不符合退货条件，因此无法为您办理退换。感谢您的理解与支持！如果您还有其他疑问，欢迎随时向我咨询。",
       "retrieval_metrics": {
         "primary_hit@5": 1.0,
         "any_hit@5": 1.0,
         "clause_recall@5": 1.0,
         "mrr@5": 0.25,
         "ndcg@5": 0.9060254355346823
-      }
+      },
+      "duration_seconds": 11.775944
     }
   ]
 }

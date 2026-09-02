@@ -119,6 +119,7 @@ def main(input_path: Path, output_path: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input", type=Path, help="scripts/run_rag_baseline.py 生成的运行产物")
-    parser.add_argument("--output", type=Path, default=Path("eval/runs/ragas.json"))
+    parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
-    main(args.input, args.output)
+    default_output = args.input.with_name(f"{args.input.stem}.ragas.json")
+    main(args.input, args.output or default_output)
