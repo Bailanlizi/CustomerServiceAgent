@@ -33,7 +33,7 @@ def _require_ragas():
     try:
         from ragas import EvaluationDataset, SingleTurnSample, evaluate
         from ragas.llms import LangchainLLMWrapper
-        from ragas.metrics import Faithfulness, FactualCorrectness
+        from ragas.metrics import Faithfulness
         from ragas.run_config import RunConfig
     except ModuleNotFoundError as exc:
         if exc.name not in {"langchain_community.chat_models.vertexai"}:
@@ -41,7 +41,7 @@ def _require_ragas():
         _install_vertexai_import_compatibility()
         from ragas import EvaluationDataset, SingleTurnSample, evaluate
         from ragas.llms import LangchainLLMWrapper
-        from ragas.metrics import Faithfulness, FactualCorrectness
+        from ragas.metrics import Faithfulness
         from ragas.run_config import RunConfig
     except ImportError as exc:
         raise RuntimeError(
@@ -53,7 +53,6 @@ def _require_ragas():
         "evaluate": evaluate,
         "LangchainLLMWrapper": LangchainLLMWrapper,
         "Faithfulness": Faithfulness,
-        "FactualCorrectness": FactualCorrectness,
         "RunConfig": RunConfig,
     }
 
@@ -61,7 +60,7 @@ def _require_ragas():
 def main(input_path: Path, output_path: Path, limit: int | None, max_workers: int) -> None:
     ragas = _require_ragas()
     from app.evaluation.chinese_ragas_prompts import (
-        ChineseClaimDecompositionPrompt, ChineseNLIStatementPrompt, ChineseStatementGeneratorPrompt,
+        ChineseNLIStatementPrompt, ChineseStatementGeneratorPrompt,
     )
     from langchain_openai import ChatOpenAI
     from pydantic import SecretStr
@@ -87,17 +86,23 @@ def main(input_path: Path, output_path: Path, limit: int | None, max_workers: in
         api_key=SecretStr(settings.JUDGE_OPENAI_API_KEY),
         model=settings.JUDGE_LLM_MODEL,
         temperature=0,
+        # DeepSeek V4（v4-flash/v4-pro）默认开启思维链（thinking），会对结构化 JSON
+        # 输出 prompt 生成数百 reasoning tokens，单次调用从 <1s 暴涨到 10~30s 且波动极大，
+        # 叠加 RAGAS 每题 4 次调用后频繁触发 RunConfig(timeout=120) 超时。
+        # judge 是确定性判断，无需推理，禁用 thinking 后单次回到 ~0.7s。
+        # 若更换为非 DeepSeek judge，需移除该参数。
+        extra_body={"thinking": {"type": "disabled"}},
     )
+    # 只保留 faithfulness：衡量「答案是否忠于检索上下文、不编造」。
+    # 曾同时评测 factual_correctness(mode=precision)，但该模式只罚「答案里有而 ground_truth
+    # 没有的 claim」，客服答案天然比一句话 ground_truth 长（条款引用+客套话+追问），导致
+    # 全对答案被系统性判低分（4 个 0 分题答案与 ground_truth 完全一致），已移除。
+    # 生成侧的事实正确性改由确定性的 answer_clause_metrics（run_rag_baseline.py）衡量。
     metrics = [
         ragas["Faithfulness"](
             statement_generator_prompt=ChineseStatementGeneratorPrompt(),
             nli_statements_prompt=ChineseNLIStatementPrompt(),
             max_retries=2,
-        ),
-        ragas["FactualCorrectness"](
-            mode="precision",
-            claim_decomposition_prompt=ChineseClaimDecompositionPrompt(),
-            nli_prompt=ChineseNLIStatementPrompt(),
         ),
     ]
     run_config = ragas["RunConfig"](timeout=120, max_retries=3, max_workers=max_workers)
