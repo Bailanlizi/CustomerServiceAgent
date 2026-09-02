@@ -1,0 +1,23 @@
+D:\PythonProject\CustomerServiceAgent\scripts\etl_policy.py:10: DeprecationWarning: `langchain-community` is being sunset and is no longer actively maintained. See https://github.com/langchain-ai/langchain-community/issues/674 for details and migration guidance toward standalone integration packages.
+  from langchain_community.document_loaders import PyPDFLoader, TextLoader
+D:\PythonProject\CustomerServiceAgent\scripts\etl_policy.py:78: DeprecationWarning: 
+        🚨 You probably want to use `session.exec()` instead of `session.execute()`.
+
+        This is the original SQLAlchemy `session.execute()` method that returns objects
+        of type `Row`, on which you have to call `scalars()` to get the model objects.
+
+        For example:
+
+        ```Python
+        result = await session.execute(select(Hero))
+        heroes = result.scalars().all()
+        ```
+
+        Instead, you could use `exec()`:
+
+        ```Python
+        result = await session.exec(select(Hero))
+        heroes = result.all()
+        ```
+        
+  await session.execute(delete(KnowledgeChunk).where(KnowledgeChunk.source == source_name))

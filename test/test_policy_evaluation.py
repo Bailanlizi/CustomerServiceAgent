@@ -6,8 +6,9 @@ def test_policy_markdown_is_split_at_clause_boundaries():
     documents = load_policy_documents("data/02_category_rules.md")
     clause_ids = [document.metadata["clause_ids"] for document in documents]
 
-    assert len(documents) == 9
-    assert clause_ids[0] == ["CAT_001"]
+    assert len(documents) == 10
+    assert clause_ids[0] == []
+    assert clause_ids[1] == ["CAT_001"]
     assert "CAT_009" in documents[-1].page_content
 
 

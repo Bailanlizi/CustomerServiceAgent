@@ -15,6 +15,8 @@ class RetrievedPolicyChunk:
     content: str
     source: str
     clause_ids: list[str]
+    canonical_clause_ids: list[str]
+    source_type: str
     rank: int
     distance: float
 
@@ -78,6 +80,8 @@ async def retrieve_policy(question: str, *, top_k: int = 5, similarity_threshold
                 content=chunk.content,
                 source=chunk.source,
                 clause_ids=list(metadata.get("clause_ids", [])),
+                canonical_clause_ids=list(metadata.get("canonical_clause_ids", [])),
+                source_type=str(metadata.get("source_type", "policy")),
                 # 保留数据库原始检索位次；阈值过滤不能改变 MRR/nDCG 的排名语义。
                 rank=raw_rank,
                 distance=float(distance),
@@ -102,6 +106,8 @@ async def load_oracle_contexts(clause_ids: list[str]) -> list[RetrievedPolicyChu
                 content=chunk.content,
                 source=chunk.source,
                 clause_ids=[clause_id],
+                canonical_clause_ids=list((chunk.meta_data or {}).get("canonical_clause_ids", [])),
+                source_type=str((chunk.meta_data or {}).get("source_type", "policy")),
                 rank=len(contexts) + 1,
                 distance=0.0,
             ))

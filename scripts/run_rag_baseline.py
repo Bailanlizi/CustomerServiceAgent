@@ -24,6 +24,8 @@ def serialize_context(context) -> dict:
         "content": context.content,
         "source": context.source,
         "clause_ids": context.clause_ids,
+        "canonical_clause_ids": context.canonical_clause_ids,
+        "source_type": context.source_type,
         "rank": context.rank,
         "distance": context.distance,
     }
@@ -72,7 +74,13 @@ def package_version(package: str) -> str | None:
         return None
 
 
-async def main(use_oracle: bool, output: Path, limit: int | None = None, concurrency: int = 4) -> None:
+async def main(
+    use_oracle: bool,
+    output: Path,
+    limit: int | None = None,
+    concurrency: int = 4,
+    retrieval_only: bool = False,
+) -> None:
     dataset = json.loads(Path("eval/testset.json").read_text(encoding="utf-8"))
     test_items = dataset["items"][:limit] if limit else dataset["items"]
     semaphore = asyncio.Semaphore(concurrency)
@@ -99,17 +107,23 @@ async def main(use_oracle: bool, output: Path, limit: int | None = None, concurr
                     if use_oracle else retrieve_policy(item["question"])
                 )
                 contexts = [serialize_context(context) for context in retrieved]
-                answer = await generate_answer(item["question"], contexts)
-                semantic_similarity = await answer_semantic_similarity(answer, item["ground_truth"])
+                answer = None
+                semantic_similarity = None
+                if not retrieval_only:
+                    answer = await generate_answer(item["question"], contexts)
+                    semantic_similarity = await answer_semantic_similarity(answer, item["ground_truth"])
             result = {
                 **item,
                 "retrieved_contexts": contexts,
-                "answer": answer,
                 "retrieval_metrics": clause_metrics(item["expected_sources"], contexts, k=5),
-                "answer_clause_metrics": answer_clause_metrics(answer, item["expected_sources"]),
-                "answer_semantic_similarity": semantic_similarity,
                 "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds(),
             }
+            if answer is not None:
+                result.update({
+                    "answer": answer,
+                    "answer_clause_metrics": answer_clause_metrics(answer, item["expected_sources"]),
+                    "answer_semantic_similarity": semantic_similarity,
+                })
             await checkpoint_result({"status": "ok", "id": item["id"], "item": result})
             return result
         except Exception as exc:
@@ -126,7 +140,7 @@ async def main(use_oracle: bool, output: Path, limit: int | None = None, concurr
     items = [item for item in results if item is not None]
 
     report = {
-        "run_type": "oracle" if use_oracle else "baseline",
+        "run_type": "oracle" if use_oracle else ("retrieval_only" if retrieval_only else "baseline"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dataset_name": dataset["dataset_name"],
         "dataset_version": dataset["version"],
@@ -151,6 +165,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=None, help="仅运行前 N 题，用于调试")
     parser.add_argument("--concurrency", type=int, default=4, help="并发请求数，默认 4")
+    parser.add_argument("--retrieval-only", action="store_true", help="仅评估检索，不调用生成模型")
     args = parser.parse_args()
     default_name = "oracle.json" if args.oracle else "baseline.json"
-    asyncio.run(main(args.oracle, args.output or Path("eval/runs") / default_name, args.limit, args.concurrency))
+    asyncio.run(main(
+        args.oracle, args.output or Path("eval/runs") / default_name,
+        args.limit, args.concurrency, args.retrieval_only,
+    ))

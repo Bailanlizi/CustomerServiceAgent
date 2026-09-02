@@ -1,5 +1,6 @@
 """验证知识库是否已按条款级元数据完成入库。"""
 import asyncio
+from collections import Counter
 from pathlib import Path
 import sys
 from sqlmodel import select
@@ -15,8 +16,15 @@ async def main() -> None:
         chunks = (await session.exec(select(KnowledgeChunk))).all()
     clause_chunks = [chunk for chunk in chunks if (chunk.meta_data or {}).get("clause_ids")]
     print(f"chunk_count={len(chunks)}")
+    print(f"chunks_by_source={dict(Counter(chunk.source for chunk in chunks))}")
     print(f"clause_metadata_count={len(clause_chunks)}")
     print(f"sample={[(chunk.source, chunk.meta_data.get('clause_ids')) for chunk in clause_chunks[:5]]}")
+    faq_mappings = [
+        (chunk.meta_data.get("clause_ids"), chunk.meta_data.get("canonical_clause_ids"))
+        for chunk in clause_chunks
+        if chunk.meta_data.get("source_type") == "faq"
+    ]
+    print(f"faq_canonical_mappings={faq_mappings[:5]}")
 
 
 if __name__ == "__main__":
