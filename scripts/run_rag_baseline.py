@@ -16,7 +16,7 @@ from app.evaluation.metrics import (
 )
 from app.core.config import settings
 from app.graph.nodes import GENERATE_SYSTEM_PROMPT, llm
-from app.services.policy_retrieval import embedding_model, load_oracle_contexts, retrieve_policy
+from app.services.policy_retrieval import embedding_model, load_oracle_contexts, load_policy_rules, retrieve_policy
 
 
 def serialize_context(context) -> dict:
@@ -31,11 +31,13 @@ def serialize_context(context) -> dict:
     }
 
 
-async def generate_answer(question: str, contexts: list[dict]) -> str:
+async def generate_answer(question: str, contexts: list[dict], policy_rules: list[str]) -> str:
     evidence = "\n\n".join(
         f"【{', '.join(context['clause_ids']) or context['source']}】\n{context['content']}"
         for context in contexts
     ) or "暂无相关参考信息。"
+    if policy_rules:
+        evidence += "\n\n【政策适用优先级】\n" + "\n".join(policy_rules)
     response = await llm.ainvoke([
         SystemMessage(content=GENERATE_SYSTEM_PROMPT),
         HumanMessage(content=f"[参考信息]：\n{evidence}\n\n[用户问题]：\n{question}"),
@@ -88,6 +90,7 @@ async def main(
     output.parent.mkdir(parents=True, exist_ok=True)
     completed = load_completed(checkpoint)
     write_lock = asyncio.Lock()
+    policy_rules = await load_policy_rules() if not retrieval_only else []
 
     async def checkpoint_result(record: dict) -> None:
         async with write_lock:
@@ -110,12 +113,13 @@ async def main(
                 answer = None
                 semantic_similarity = None
                 if not retrieval_only:
-                    answer = await generate_answer(item["question"], contexts)
+                    answer = await generate_answer(item["question"], contexts, policy_rules)
                     semantic_similarity = await answer_semantic_similarity(answer, item["ground_truth"])
             result = {
                 **item,
                 "retrieved_contexts": contexts,
                 "retrieval_metrics": clause_metrics(item["expected_sources"], contexts, k=5),
+                "policy_rules": policy_rules,
                 "duration_seconds": (datetime.now(timezone.utc) - started_at).total_seconds(),
             }
             if answer is not None:
@@ -144,7 +148,10 @@ async def main(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dataset_name": dataset["dataset_name"],
         "dataset_version": dataset["version"],
-        "retrieval_config": {"top_k": 5, "similarity_threshold": 0.5},
+        "retrieval_config": {
+            "top_k": 5, "similarity_threshold": 0.5,
+            "exclude_policy_rules": True, "faq_authority_rerank": "top_k_only",
+        },
         "models": {"llm": settings.LLM_MODEL, "embedding": settings.EMBEDDING_MODEL},
         "packages": {"langchain-openai": package_version("langchain-openai"), "ragas": package_version("ragas")},
         "checkpoint": str(checkpoint),

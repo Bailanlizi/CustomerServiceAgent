@@ -1,4 +1,5 @@
 # app/graph/nodes.py
+import asyncio
 from typing import List, Literal
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -12,7 +13,7 @@ from sqlmodel import select
 from pydantic import BaseModel, SecretStr
 from langchain_core.messages import AIMessage, BaseMessage
 from app.graph.tools import refund_tools
-from app.services.policy_retrieval import QwenEmbeddings, embedding_model, retrieve_policy
+from app.services.policy_retrieval import QwenEmbeddings, embedding_model, load_policy_rules, retrieve_policy
 
 
 # 相似度阈值：只有距离 < 0.5 才认为相关
@@ -59,13 +60,16 @@ async def retrieve(state: AgentState) -> dict:
     question = state["question"]
     print(f"🔍 [Retrieve] 正在检索: {question}")
 
-    retrieved = await retrieve_policy(question, similarity_threshold=SIMILARITY_THRESHOLD)
+    retrieved, policy_rules = await asyncio.gather(
+        retrieve_policy(question, similarity_threshold=SIMILARITY_THRESHOLD),
+        load_policy_rules(),
+    )
     valid_chunks = [chunk.content for chunk in retrieved]
     for chunk in retrieved:
         print(f"   - {chunk.clause_ids or ['未标注条款']}: {chunk.content[:10]}... | 距离分: {chunk.distance:.4f}")
 
     print(f" [Retrieve] 最终有效记录: {len(valid_chunks)} 条")
-    return {"context": valid_chunks}
+    return {"context": valid_chunks, "policy_rules": policy_rules}
 
 
 # Generate 节点的 System Prompt
@@ -88,6 +92,9 @@ async def generate(state: AgentState) -> dict:
     # 加入政策背景
     if state.get("context"):
         context_parts.append("【相关政策】:\n" + "\n".join(state["context"]))
+
+    if state.get("intent") == "POLICY" and state.get("policy_rules"):
+        context_parts.append("【政策适用优先级】:\n" + "\n".join(state["policy_rules"]))
     
     # 加入订单背景
     if state.get("order_data"):

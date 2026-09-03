@@ -1,5 +1,5 @@
 # app/graph/state.py
-from typing import TypedDict, List, Optional, Annotated
+from typing import TypedDict, List, Optional, Annotated, NotRequired
 from langchain_core.messages import BaseMessage
 import operator
 
@@ -16,6 +16,9 @@ class AgentState(TypedDict):
     
     # 检索到的知识 
     context:  List[str]
+
+    # 仅政策咨询路径注入的文档级优先级规则，不参与向量 Top-K 竞争。
+    policy_rules: NotRequired[List[str]]
     
     # 查到的订单数据 
     order_data: Optional[dict]

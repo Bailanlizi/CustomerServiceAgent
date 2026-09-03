@@ -75,7 +75,7 @@ def main(input_path: Path, output_path: Path, limit: int | None, max_workers: in
     run_items = run["items"][:limit] if limit else run["items"]
     samples = [ragas["SingleTurnSample"](
         user_input=item["question"],
-        retrieved_contexts=[context["content"] for context in item["retrieved_contexts"]],
+        retrieved_contexts=[context["content"] for context in item["retrieved_contexts"]] + item.get("policy_rules", []),
         response=item["answer"],
         reference=item["ground_truth"],
     ) for item in run_items]

@@ -1,5 +1,6 @@
 from app.evaluation.metrics import answer_clause_metrics, aggregate_metrics, clause_metrics
 from app.services.policy_chunks import load_policy_documents
+from app.services.policy_retrieval import RetrievedPolicyChunk, _rerank_by_authority
 
 
 def test_policy_markdown_is_split_at_clause_boundaries():
@@ -43,6 +44,25 @@ def test_clause_metrics_preserve_raw_rank_and_do_not_double_count_duplicate_chun
 
     assert metrics["mrr@5"] == 1 / 2
     assert 0 < metrics["ndcg@5"] < 1.0
+
+
+def test_authority_rerank_promotes_policy_referenced_by_faq_without_dropping_faq():
+    faq = RetrievedPolicyChunk(
+        content="FAQ", source="06_faq.md", clause_ids=["FAQ_016"],
+        canonical_clause_ids=["QUALITY_004"], source_type="faq", rank=1, distance=0.1,
+    )
+    authority = RetrievedPolicyChunk(
+        content="policy", source="03_quality_return_policy.md", clause_ids=["QUALITY_004"],
+        canonical_clause_ids=[], source_type="policy", rank=3, distance=0.2,
+    )
+    other = RetrievedPolicyChunk(
+        content="other", source="03_quality_return_policy.md", clause_ids=["QUALITY_001"],
+        canonical_clause_ids=[], source_type="policy", rank=2, distance=0.15,
+    )
+
+    ranked = _rerank_by_authority([faq, other, authority], top_k=3)
+
+    assert [chunk.clause_ids[0] for chunk in ranked] == ["QUALITY_004", "FAQ_016", "QUALITY_001"]
 
 
 def test_answer_clause_metrics_keep_unexpected_citations_as_review_signal():
