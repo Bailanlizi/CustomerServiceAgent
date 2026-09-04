@@ -1,8 +1,9 @@
 # app/graph/state.py
 import operator
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
@@ -33,9 +34,23 @@ class AgentState(TypedDict):
     
     # v4.0 新增：会话 ID
     thread_id: str
+
+    # P0: stable business session and structured working memory
+    conversation_id: NotRequired[str]
+    client_session_id: NotRequired[str]
+    active_domain: NotRequired[Literal["ORDER", "POLICY", "REFUND"] | None]
+    active_order_id: NotRequired[int | None]
+    active_order_sn: NotRequired[str | None]
+    conversation_goal: NotRequired[str | None]
+    collected_slots: NotRequired[dict[str, object]]
+    pending_slots: NotRequired[list[str]]
+    workflow_stage: NotRequired[str | None]
+    last_tool_result: NotRequired[dict | None]
+    next_action: NotRequired[Literal["ASK", "TOOL_CALL", "COMPOSE", "WAIT"] | None]
+    conversation_summary: NotRequired[str | None]
     
     # v4.0 新增：结构化消息列表
-    messages:  Annotated[list[BaseMessage], operator.add]
+    messages: Annotated[list[BaseMessage], add_messages]
     
     # 最终回复
     answer: str

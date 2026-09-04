@@ -1,5 +1,6 @@
 # app/api/v1/chat.py
 import json
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -7,10 +8,18 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.api.v1.schemas import ChatRequest
+from app.conversation.state_manager import (
+    ConversationForbiddenError,
+    ConversationMismatchError,
+    ConversationNotFoundError,
+    ConversationStateManager,
+    default_working_memory,
+)
 from app.core.security import get_current_user_id
 from app.services.policy_answer_guard import INTERNAL_LLM_TAG, POLICY_GUARD_TAG
 
 router = APIRouter()
+conversation_manager = ConversationStateManager()
 
 @router.post("/chat")
 async def chat(
@@ -32,26 +41,57 @@ async def chat(
             detail="Chat service is not fully initialized. Please try again in a moment."
         )
 
+    client_session_id = request.resolved_client_session_id
+    try:
+        if hasattr(app_graph, "aget_state"):
+            conversation = await conversation_manager.resolve_session(
+                current_user_id, client_session_id, request.conversation_id
+            )
+            memory = await conversation_manager.prepare_turn(conversation, request.question)
+        else:
+            # Lightweight graph doubles used by unit tests do not own persistence.
+            conversation = SimpleNamespace(
+                conversation_id=request.conversation_id or client_session_id,
+                client_session_id=client_session_id,
+                checkpoint_thread_id=f"test:{current_user_id}:{client_session_id}",
+            )
+            memory = default_working_memory()
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    except ConversationForbiddenError as exc:
+        raise HTTPException(status_code=403, detail="Conversation belongs to another user") from exc
+    except ConversationMismatchError as exc:
+        raise HTTPException(status_code=409, detail="Conversation and client session do not match") from exc
+
     async def event_generator():
         """SSE 流式响应生成器"""
         from app.graph.workflow import app_graph
         
-        thread_id = f"{current_user_id}_{request.thread_id}" 
+        thread_id = conversation.checkpoint_thread_id
         config: RunnableConfig = {"configurable": {"thread_id":  thread_id}}
 
         initial_state = {
             "question":  request.question,
             "user_id": current_user_id,
             "thread_id": thread_id,
+            "conversation_id": str(conversation.conversation_id),
+            "client_session_id": client_session_id,
             "history": [], 
             "context": [],
             "order_data": None,
             "answer": "",
             # messages 使用 add reducer；每轮显式追加本轮用户消息，供退款 Tool Agent 消费。
             "messages": [HumanMessage(content=request.question)],
+            **memory,
         }
 
         try:
+            session_payload = json.dumps({
+                "type": "session",
+                "conversation_id": str(conversation.conversation_id),
+                "client_session_id": client_session_id,
+            }, ensure_ascii=False)
+            yield f"data: {session_payload}\n\n"
             token_sent = False
             fallback_answer = ""
             async for event in app_graph.astream_events(
@@ -87,9 +127,23 @@ async def chat(
                 payload = json.dumps({"token": fallback_answer}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
 
+            if hasattr(app_graph, "aget_state"):
+                snapshot = await app_graph.aget_state(config)
+                values = dict(snapshot.values)
+                compacted = await conversation_manager.persist_turn(conversation, values)
+                messages = list(values.get("messages") or [])
+                retained = conversation_manager.retained_messages(messages)
+                if compacted and len(retained) < len(messages):
+                    from langchain_core.messages import RemoveMessage
+                    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+                    await app_graph.aupdate_state(
+                        config,
+                        {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *retained]},
+                    )
+
             yield "data: [DONE]\n\n"
             
-        except Exception as e: 
+        except Exception as e:  # noqa: BLE001 - SSE must serialize all runtime failures.
             error_msg = json.dumps({'error': str(e)}, ensure_ascii=False)
             yield f"data: {error_msg}\n\n"
 

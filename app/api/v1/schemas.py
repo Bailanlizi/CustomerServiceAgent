@@ -1,12 +1,28 @@
 # app/api/v1/schemas.py
-from pydantic import BaseModel, Field
+from uuid import UUID
+
+from pydantic import BaseModel, Field, model_validator
 
 class ChatRequest(BaseModel):
     # 用户的问题
     question: str = Field(..., example="内衣拆封了可以退吗？")
     
-    # 会话 ID，用于后续追踪对话上下文 (v1.0 暂不强制，但预留)
-    thread_id: str = Field("default_thread", example="user_123_session_001")
+    client_session_id: str | None = Field(
+        default=None, min_length=1, max_length=128, examples=["browser_123"]
+    )
+    conversation_id: UUID | None = None
+    # Deprecated compatibility alias. New clients must use client_session_id.
+    thread_id: str | None = Field(default="default_thread", min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def require_client_session(self):
+        if not self.client_session_id and not self.thread_id:
+            raise ValueError("client_session_id is required")
+        return self
+
+    @property
+    def resolved_client_session_id(self) -> str:
+        return self.client_session_id or self.thread_id or ""
 
 class ChatResponse(BaseModel):
     # 非流式模式下的返回结构

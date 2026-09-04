@@ -4,6 +4,7 @@ from app.models.refund import RefundApplication, RefundStatus, RefundReason
 from app.models.message import MessageCard, MessageType, MessageStatus
 from app.models.audit import AuditLog, RiskLevel, AuditAction
 from app.models.user import User
+from app.models.conversation import ConversationSession
 
 __all__ = [
     "KnowledgeChunk",
@@ -20,4 +21,5 @@ __all__ = [
     "RiskLevel",
     "AuditAction",
     "User",
+    "ConversationSession",
 ]

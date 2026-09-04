@@ -38,6 +38,8 @@ async def test_policy_sse_sends_verified_chain_output_after_generation(monkeypat
     response = await chat(ChatRequest(question="退货政策是什么？"), current_user_id=1)
     body = await _sse_body(response)
 
+    assert '"type": "session"' in body
+    assert '"client_session_id": "default_thread"' in body
     assert f'data: {json.dumps({"token": "这是已完成引用校验的政策答复。"}, ensure_ascii=False)}' in body
     assert body.endswith("data: [DONE]\n\n")
 

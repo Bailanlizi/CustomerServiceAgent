@@ -17,6 +17,7 @@ from app.models.refund import RefundApplication
 from app.models.audit import AuditLog
 from app.models.message import MessageCard
 from app.models.user import User
+from app.models.conversation import ConversationSession
 # ==========================================
 
 config = context.config

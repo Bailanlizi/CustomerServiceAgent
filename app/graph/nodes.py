@@ -335,6 +335,14 @@ async def intent_router(state: AgentState):
     """
     意图识别节点：判断用户想干什么
     """
+    # ConversationStateManager has already resolved compatible follow-ups and
+    # explicit domain switches. Reuse that decision to avoid reclassifying a
+    # bare order number or refund reason as an unrelated intent.
+    active_domain = state.get("active_domain")
+    if active_domain in {"ORDER", "POLICY", "REFUND"}:
+        print(f" [Router] 复用活跃领域: {active_domain}")
+        return {"intent": active_domain}
+
     print(f" [Router] 正在分析意图:  {state['question']}")
     
     decision = await intent_classifier.ainvoke(
@@ -443,9 +451,18 @@ async def refund_agent(state: AgentState) -> dict:
         list(state.get("messages", [])), state["question"]
     )
 
+    slots = state.get("collected_slots", {})
+    memory_context = (
+        "\n\n当前已确认的会话信息（不要重复询问）："
+        f"订单号={state.get('active_order_sn') or slots.get('order_sn') or '未确认'}；"
+        f"退款原因={slots.get('refund_reason') or '未确认'}；"
+        f"仍缺字段={state.get('pending_slots', [])}；"
+        f"摘要={state.get('conversation_summary') or '无'}。"
+        "只有仍缺失的字段才可以向用户询问。"
+    )
     response = None
     async for chunk in llm.bind_tools(refund_tools).astream(
-        [SystemMessage(content=REFUND_AGENT_PROMPT), *messages]
+        [SystemMessage(content=REFUND_AGENT_PROMPT + memory_context), *messages]
     ):
         response = chunk if response is None else response + chunk
 

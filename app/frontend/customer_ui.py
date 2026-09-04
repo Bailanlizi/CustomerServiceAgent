@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import gradio as gr
 import requests
 import json
-import time
 import os
+import uuid
 from typing import List, Dict, Optional, Tuple
 from gradio import themes
 
@@ -26,11 +26,14 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 class ChatClient:
     """聊天客户端 - 支持真实登录"""
     
-    def __init__(self, token: str, user_id: int, username: str):
+    def __init__(self, token: str, user_id: int, username: str, client_session_id: str):
         self.token = token
         self.user_id = user_id
         self.username = username
-        self.thread_id = f"gradio_{username}_{int(time.time())}"
+        self.client_session_id = client_session_id
+        self.conversation_id = None
+        # Kept for status compatibility until that API is migrated.
+        self.thread_id = None
         print(f"✅ 客户端已初始化:  用户={username}, ID={user_id}")
     
     def send_message(self, message: str) -> Tuple[bool, str, dict]:
@@ -51,7 +54,8 @@ class ChatClient:
                 headers=headers,
                 json={
                     "question": message,
-                    "thread_id": self.thread_id
+                    "client_session_id": self.client_session_id,
+                    "conversation_id": self.conversation_id,
                 },
                 stream=True,
                 timeout=60
@@ -79,6 +83,9 @@ class ChatClient:
                             data = json.loads(data_str)
                             if 'token' in data:
                                 full_answer += data['token']
+                            elif data.get('type') == 'session':
+                                self.conversation_id = data['conversation_id']
+                                self.thread_id = f"conversation:{self.conversation_id}"
                             elif 'error' in data:
                                 return False, f"Agent 错误: {data['error']}", {}
                         except json.JSONDecodeError:
@@ -93,6 +100,8 @@ class ChatClient:
     
     def check_status(self) -> dict:
         """检查会话状态"""
+        if not self.thread_id:
+            return {}
         headers = {"Authorization": f"Bearer {self.token}"}
         try:
             response = requests.get(
@@ -105,7 +114,7 @@ class ChatClient:
             return {}
 
 
-def login_user(username: str, password: str) -> Tuple[bool, str, Optional[ChatClient], str]:
+def login_user(username: str, password: str, client_session_id: str) -> Tuple[bool, str, Optional[ChatClient], str]:
     """
     用户登录
     
@@ -127,7 +136,8 @@ def login_user(username: str, password: str) -> Tuple[bool, str, Optional[ChatCl
             client = ChatClient(
                 token=data["access_token"],
                 user_id=data["user_id"],
-                username=data["username"]
+                username=data["username"],
+                client_session_id=client_session_id,
             )
             
             user_info = f"""
@@ -229,6 +239,7 @@ def create_chat_interface():
         
         # 状态存储
         client_state = gr.State(None)
+        browser_session = gr.BrowserState(str(uuid.uuid4()))
         
         # ====================
         #  登录界面 
@@ -325,12 +336,14 @@ def create_chat_interface():
                         btn_refund_high = gr.Button("模拟: 大额退款(触发风控)", size="sm")
                     
                     gr.Markdown("---")
-                    clear_btn = gr.Button(" 清空历史", variant="stop", size="sm")
+                    clear_btn = gr.Button(" 清空显示", variant="stop", size="sm")
+                    new_session_btn = gr.Button(" 新建会话", variant="secondary", size="sm")
 
         # === 逻辑函数 ===
         
-        def handle_login(username, password):
-            success, message, client, user_info = login_user(username, password)
+        def handle_login(username, password, stored_session_id):
+            session_id = stored_session_id or str(uuid.uuid4())
+            success, message, client, user_info = login_user(username, password, session_id)
             if success:
                 # 提取姓名用于 Header 显示
                 name = client.username
@@ -345,10 +358,11 @@ def create_chat_interface():
                     gr.update(visible=True),  # 显示聊天
                     header_html,
                     "", "", # 清空输入框
-                    gr.Info("登录成功！") # 使用 Gradio 内置通知
+                    gr.Info("登录成功！"), # 使用 Gradio 内置通知
+                    session_id,
                 )
             else:
-                return (None, gr.update(visible=True), gr.update(visible=False), "", username, password, gr.Warning(message))
+                return (None, gr.update(visible=True), gr.update(visible=False), "", username, password, gr.Warning(message), session_id)
 
         def handle_logout():
             return (
@@ -423,8 +437,8 @@ def create_chat_interface():
         # === 绑定事件 ===
         login_btn.click(
             handle_login,
-            inputs=[username_input, password_input],
-            outputs=[client_state, login_panel, chat_panel, user_header_display, username_input, password_input, login_message]
+            inputs=[username_input, password_input, browser_session],
+            outputs=[client_state, login_panel, chat_panel, user_header_display, username_input, password_input, login_message, browser_session]
         )
         
         logout_btn.click(
@@ -445,6 +459,20 @@ def create_chat_interface():
         )
         
         clear_btn.click(lambda: [], outputs=[chatbot])
+
+        def start_new_session(client):
+            new_id = str(uuid.uuid4())
+            if client:
+                client.client_session_id = new_id
+                client.conversation_id = None
+                client.thread_id = None
+            return client, [], "", new_id
+
+        new_session_btn.click(
+            start_new_session,
+            inputs=[client_state],
+            outputs=[client_state, chatbot, status_display, browser_session],
+        )
         
         # 快捷按钮逻辑
         btn_query_own.click(lambda: "查询我的订单", outputs=msg_input)
