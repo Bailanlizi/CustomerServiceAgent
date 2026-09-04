@@ -13,14 +13,22 @@ from sqlmodel import select
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.models.conversation import ConversationSession
+from app.models.order import Order
 
 MEMORY_KEYS = (
     "active_domain", "active_order_id", "active_order_sn", "conversation_goal",
     "collected_slots", "pending_slots", "workflow_stage", "last_tool_result",
-    "next_action", "conversation_summary",
+    "next_action", "conversation_summary", "refund_reason_category",
 )
-SUMMARY_TRIGGER_TURNS = 12
-SUMMARY_RETAIN_TURNS = 3
+SUMMARY_TRIGGER_TURNS = 6
+# P1 修复: 客服平均对话 4-8 轮，12 触发偏晚；保留 3 轮又可能裁掉 ORDER 查询
+# 中间事实（例如 6 轮里用户先查 SN001 又换 SN002，仅靠摘要字段难以定位）。
+# 阈值降到 6、保留 5：保证用户在平均一轮对话长度结束前触发压缩；
+# 同时保留足够多的最近消息让模型可以原样读到上一轮的订单号与问题。
+SUMMARY_RETAIN_TURNS = 5
+# 摘要置顶前缀：在 _summarize 渲染时强制拼到第一行，避免 LLM 把活跃订单号
+# 压缩掉后导致下一轮模型忘记当前 case 的 SN。
+SUMMARY_PINNED_SN_PREFIX = "【置顶】当前活跃订单号："
 ORDER_SN_PATTERN = re.compile(r"(?<![A-Z0-9])SN\d+\b", re.IGNORECASE)
 
 
@@ -41,6 +49,12 @@ class SlotExtraction(BaseModel):
     explicit_new_goal: bool = False
     conversation_goal: str | None = None
     refund_reason: str | None = None
+    # P1 修复: 退款原因分类由 LLM 一次产出，避免后续在工具侧再做 free-text → enum
+    # 映射时漏匹配。值集与 RefundReason 枚举严格对齐，模型只能在列出的字面量中选择。
+    refund_reason_category: Literal[
+        "QUALITY_ISSUE", "SIZE_NOT_FIT", "NOT_AS_DESCRIBED",
+        "CHANGED_MIND", "OTHER",
+    ] | None = None
     user_constraints: list[str] = Field(default_factory=list)
 
 
@@ -76,6 +90,7 @@ def default_working_memory() -> dict[str, Any]:
         "last_tool_result": None,
         "next_action": None,
         "conversation_summary": None,
+        "refund_reason_category": None,
     }
 
 
@@ -163,13 +178,20 @@ class ConversationStateManager:
         extraction = await self._extract(question, memory)
         previous_domain = memory.get("active_domain")
         candidate = extraction.domain
-        compatible_followup = previous_domain == "REFUND" and (
-            bool(explicit_order) or bool(extraction.refund_reason) or candidate in {"REFUND", "OTHER"}
+        # P1 修复: 用户明确表达目标切换（"我要退款/查订单/问政策"）时，绝不能被
+        # 兜底到 previous_domain。只有当 LLM 给出明确的领域分类时，candidate 才允许
+        # 无脑覆盖之前的活跃领域；OTHER 仍保持兜底，不强行切换避免误判。
+        explicit_new_destination = (
+            extraction.explicit_new_goal and candidate in {"ORDER", "POLICY", "REFUND"}
         )
-        if previous_domain and (
-            (compatible_followup and not extraction.explicit_new_goal) or candidate == "OTHER"
-        ):
-            candidate = previous_domain
+        if not explicit_new_destination:
+            compatible_followup = previous_domain == "REFUND" and (
+                bool(explicit_order) or bool(extraction.refund_reason) or candidate in {"REFUND", "OTHER"}
+            )
+            if previous_domain and (
+                (compatible_followup and not extraction.explicit_new_goal) or candidate == "OTHER"
+            ):
+                candidate = previous_domain
 
         if candidate in {"ORDER", "POLICY", "REFUND"}:
             memory["active_domain"] = candidate
@@ -184,6 +206,10 @@ class ConversationStateManager:
                 [*slots.get("user_constraints", []), *extraction.user_constraints]
             ))
         memory["collected_slots"] = slots
+        # P1 修复: 将退款原因分类写入 working memory，让 submit_refund_application
+        # 通过 InjectedState 直接消费，避免 LLM 在工具调用时再次做 free-text → enum 映射。
+        if extraction.refund_reason_category:
+            memory["refund_reason_category"] = extraction.refund_reason_category
 
         if memory["active_domain"] == "REFUND":
             pending = []
@@ -202,8 +228,13 @@ class ConversationStateManager:
     async def _extract(self, question: str, memory: dict[str, Any]) -> SlotExtraction:
         prompt = (
             "从用户最新一句话提取客服流程信息。domain 只能是 ORDER/POLICY/REFUND/OTHER；"
-            "只有用户清楚提出不同任务时 explicit_new_goal 才为 true；退款原因必须是用户明确表达的原因，"
-            "不得推测。\n当前记忆：" + json.dumps(memory, ensure_ascii=False, default=str)
+            "只有用户清楚提出不同任务（如'我要退款''换个问题''我先问下运费'）时 explicit_new_goal 才为 true；"
+            "退款原因必须是用户明确表达的原因，不得推测。"
+            "若用户在退款语境下表达退款原因，必须同时给出 refund_reason_category，"
+            "可选值严格为 QUALITY_ISSUE(质量问题) / SIZE_NOT_FIT(尺码不合适) / "
+            "NOT_AS_DESCRIBED(与描述不符) / CHANGED_MIND(不想要了) / OTHER(其他)，"
+            "不得使用其他字面量；判断不了分类时填 OTHER。\n"
+            "当前记忆：" + json.dumps(memory, ensure_ascii=False, default=str)
             + "\n最新输入：" + question
         )
         try:
@@ -234,6 +265,19 @@ class ConversationStateManager:
             memory["collected_slots"] = {
                 **(memory.get("collected_slots") or {}), "order_sn": order_data["order_sn"]
             }
+        # P1 修复: REFUND 路径下 state["order_data"] 永远是 None，active_order_id
+        # 无法被持久化，导致 admin 工作台按 case 维度聚合时缺关键字段。
+        # 这里在回合结束前基于 active_order_sn + user_id 反查一次 Order，得到的
+        # id 写回 working memory。下一次 checkout / submit 时工具无需再让 LLM
+        # 重新声明订单号，避免"工作记忆里有了订单号但工具还要再问"的断点。
+        if memory.get("active_order_sn") and not memory.get("active_order_id"):
+            user_id = state.get("user_id")
+            if user_id is not None:
+                order_id = await self._resolve_order_id(
+                    memory["active_order_sn"], user_id
+                )
+                if order_id is not None:
+                    memory["active_order_id"] = order_id
 
         messages = list(state.get("messages") or [])
         summary = session.conversation_summary
@@ -277,6 +321,24 @@ class ConversationStateManager:
             await db.commit()
         return compacted
 
+    @staticmethod
+    async def _resolve_order_id(order_sn: str, user_id: int) -> int | None:
+        """根据订单号 + 用户 ID 反查订单主键。
+
+        仅在 active_order_id 缺失时调用，目的不是替代实时查询，而是把"工作记忆"
+        里已经确认的订单号固化成一个稳定的内部主键，供 P1 工具注册表校验、
+        审计日志关联和 admin 工作台按 case 维度聚合使用。查不到时返回 None，
+        不抛异常——下次回合由 REFUND 工具再次校验即可。
+        """
+        async with async_session_maker() as db:
+            stmt = select(Order).where(
+                Order.order_sn == order_sn,
+                Order.user_id == user_id,
+            )
+            result = await db.exec(stmt)
+            order = result.first()
+        return order.id if order else None
+
     async def _summarize(
         self, messages: list[BaseMessage], memory: dict[str, Any], previous: str | None
     ) -> str | None:
@@ -289,10 +351,22 @@ class ConversationStateManager:
             raw = await self.summarizer.ainvoke([HumanMessage(content=prompt)])
             result = ConversationSummary.model_validate(raw)
             rendered = result.render()
+            # P1 修复: 强制把 active_order_sn 置顶在摘要第一行，避免长对话
+            # 压缩后下一轮模型忘记当前 case 的 SN。这里直接拼接，不依赖 LLM
+            # 输出：1) SN 永远在最前不会被其他事实抢位；2) 即便保留的消息窗口
+            # 已经裁掉原 SN 消息，摘要里仍能找回；3) required 校验仍可放行，
+            # 因为我们主动把 SN 写进了 rendered。
+            pinned_sn = memory.get("active_order_sn")
+            if pinned_sn:
+                pin_line = f"{SUMMARY_PINNED_SN_PREFIX}{pinned_sn}"
+                if pin_line not in rendered:
+                    rendered = f"{pin_line}\n{rendered}"
+            # P1 修复: 只校验 SN。active_order_id 是数据库主键，LLM 不会把它
+            # 写进自然语言事实文本；而下一轮退款工具本来就会按 SN 反查 ID，
+            # 不需要在摘要里同时出现主键。
             required = [
-                str(value) for value in (
-                    memory.get("active_order_id"), memory.get("active_order_sn")
-                ) if value is not None
+                str(value) for value in (memory.get("active_order_sn"),)
+                if value is not None
             ]
             if any(value not in rendered for value in required):
                 return None

@@ -76,7 +76,6 @@ async def test_v3():
         initial_state = {
             "question": case["query"],
             "user_id": case["user_id"],
-            "history": [],
             "context": [],
             "order_data": None,
             "intent": None,

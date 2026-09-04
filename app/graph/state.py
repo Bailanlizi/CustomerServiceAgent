@@ -1,5 +1,4 @@
 # app/graph/state.py
-import operator
 from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
@@ -13,11 +12,8 @@ class AgentState(TypedDict):
     
     # 意图标签:  "POLICY" 或 "ORDER" 或 "REFUND" 或 "OTHER"
     intent: str | None
-    
-    # 历史记录 (用于多轮对话)
-    history:  Annotated[list[dict], operator.add]
-    
-    # 检索到的知识 
+
+    # 检索到的知识
     context:  list[str]
 
     # 仅政策咨询路径注入的文档级优先级规则，不参与向量 Top-K 竞争。
@@ -48,6 +44,9 @@ class AgentState(TypedDict):
     last_tool_result: NotRequired[dict | None]
     next_action: NotRequired[Literal["ASK", "TOOL_CALL", "COMPOSE", "WAIT"] | None]
     conversation_summary: NotRequired[str | None]
+    # P1 修复: 退款原因分类枚举，由 SlotExtraction 一次产出，写入工作记忆，
+    # 提交退款工具通过 InjectedState 直接消费，避免 LLM 二次映射。
+    refund_reason_category: NotRequired[str | None]
     
     # v4.0 新增：结构化消息列表
     messages: Annotated[list[BaseMessage], add_messages]

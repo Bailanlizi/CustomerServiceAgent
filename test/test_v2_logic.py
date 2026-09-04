@@ -23,7 +23,6 @@ async def simulate_agent_call(query: str, user_id: int, thread_id: str):
     initial_state = {
         "question": query,
         "user_id": user_id,
-        "history": [],
         "context": [],
         "order_data": None,
         "answer": ""

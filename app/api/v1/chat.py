@@ -76,7 +76,6 @@ async def chat(
             "thread_id": thread_id,
             "conversation_id": str(conversation.conversation_id),
             "client_session_id": client_session_id,
-            "history": [], 
             "context": [],
             "order_data": None,
             "answer": "",

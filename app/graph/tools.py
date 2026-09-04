@@ -2,24 +2,24 @@
 """
 LangGraph Tools: Agent 可调用的工具函数
 """
-from typing import Optional, Annotated
+from typing import Annotated
+
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from pydantic import Field
+from sqlmodel import select
 
+from app.core.config import settings
 from app.core.database import async_session_maker
+from app.models.audit import AuditAction, AuditLog, RiskLevel
+from app.models.order import Order
 from app.services.refund_service import (
     RefundApplicationService,
     RefundEligibilityChecker,
-    RefundReason
+    RefundReason,
 )
-from app.models.order import Order
-from sqlmodel import select
-from app.core.config import settings
-from app.models.audit import AuditAction, AuditLog, RiskLevel
 from app.tasks.refund_tasks import notify_admin_audit
 from app.websocket.manager import manager
-
 
 # ==========================================
 # 工具 1: 检查退货资格
@@ -27,20 +27,32 @@ from app.websocket.manager import manager
 
 @tool
 async def check_refund_eligibility(
-    order_sn:  Annotated[str, Field(description="订单号，格式如 SN20240001")],
-    user_id: Annotated[int, InjectedState("user_id")]
+    # P1 修复: 订单号同样改为 InjectedState，来源是 ConversationStateManager
+    # 已确认的 active_order_sn，避免 LLM 在工具调用时重新声明、与工作记忆不一致。
+    # 标 Optional 是因为工作记忆缺值时 Pydantic 会注入 None，前置校验负责给出
+    # 用户友好的拒绝信息，而不是被工具签名校验打断。
+    order_sn: Annotated[str | None, InjectedState("active_order_sn")] = None,
+    user_id: Annotated[int | None, InjectedState("user_id")] = None,
 ) -> str:
     """
     检查订单是否符合退货条件。
-    
+
     使用场景：
     - 用户询问"我的订单能退货吗？"
     - 在正式申请退货前进行资格预检
-    
+
+    前置约束：
+    - 订单号必须已写入会话工作记忆（active_order_sn），否则提示用户补全。
+
     返回：
     - 如果可以退货，返回"符合退货条件"及详细说明
     - 如果不能退货，返回拒绝原因（如：超期、已退、商品类别等）
     """
+    if not order_sn:
+        return "❌ 缺少订单号，无法进行资格预检。请先告知要查询的订单号。"
+    if not user_id:
+        return "❌ 缺少用户身份，无法进行资格预检。"
+
     async with async_session_maker() as session:
         # 1. 查询订单（带用户权限校验）
         stmt = select(Order).where(
@@ -49,7 +61,7 @@ async def check_refund_eligibility(
         )
         result = await session.exec(stmt)
         order = result.first()
-        
+
         if not order:
             return f"❌ 未找到订单 {order_sn}，或您无权访问此订单。"
         
@@ -81,31 +93,47 @@ async def check_refund_eligibility(
 
 @tool
 async def submit_refund_application(
-    order_sn: Annotated[str, Field(description="订单号，格式如 SN20240001")],
-    user_id: Annotated[int, InjectedState("user_id")],
-    thread_id: Annotated[str, InjectedState("thread_id")],
-    reason_detail: Annotated[str, Field(description="用户填写的退货原因详细描述")],
+    # P1 修复: 订单号、退款原因与分类由 ConversationStateManager 写入 working memory，
+    # 这里通过 InjectedState 直接消费；不再让 LLM 自由声明参数，杜绝"工作记忆里有
+    # 订单号但工具仍要求重新输入/拼写不一致"的接口鸿沟。
+    order_sn: Annotated[str | None, InjectedState("active_order_sn")] = None,
+    user_id: Annotated[int | None, InjectedState("user_id")] = None,
+    thread_id: Annotated[str | None, InjectedState("thread_id")] = None,
+    reason_detail: Annotated[dict | None, InjectedState("collected_slots")] = None,
     reason_category: Annotated[
-        Optional[str], 
-        Field(description="退货原因分类，可选值:  QUALITY_ISSUE(质量问题), SIZE_NOT_FIT(尺码不合适), NOT_AS_DESCRIBED(与描述不符), CHANGED_MIND(不想要了), OTHER(其他)")
-    ] = None
+        str | None,
+        InjectedState("refund_reason_category"),
+    ] = None,
 ) -> str:
     """
     提交退货申请。
-    
+
     使用场景：
     - 用户明确表示"我要退货"
-    - 用户已提供退货原因
-    
+    - 工作记忆已记录订单号与退款原因（free-text + enum 分类）
+
     注意：
-    - 此工具会自动校验退货资格
-    - 如果资格不符，会直接拒绝并返回原因
-    - 成功后会生成退货申请记录
-    
+    - 订单号与退款原因必须由工作记忆提供，缺失时直接拒绝并提示用户补全，避免
+      "前端说订单号已经被记住、工具仍要求再问一遍"的体感反复。
+    - 此工具会自动校验退货资格。如果资格不符，会直接拒绝并返回原因。
+    - 成功后会生成退货申请记录并触发审核通知。
+
     返回：
     - 成功：返回申请编号和后续流程说明
     - 失败：返回拒绝原因
     """
+    # ========== 前置校验: 订单号 ==========
+    if not order_sn:
+        return "❌ 缺少订单号，无法提交退款申请。请先告知要退货的订单号。"
+    # ========== 前置校验: 用户身份 ==========
+    if not user_id:
+        return "❌ 缺少用户身份，无法提交退款申请。"
+    # ========== 前置校验: 退款原因 ==========
+    slots = reason_detail if isinstance(reason_detail, dict) else {}
+    reason_text = slots.get("refund_reason") if isinstance(slots, dict) else None
+    if not reason_text:
+        return "❌ 缺少退货原因，无法提交退款申请。请先说明退货原因（如质量问题、尺码不合适等）。"
+
     async with async_session_maker() as session:
         # 1. 查询订单
         stmt = select(Order).where(
@@ -114,23 +142,23 @@ async def submit_refund_application(
         )
         result = await session.exec(stmt)
         order = result.first()
-        
-        if not order: 
+
+        if not order:
             return f"❌ 未找到订单 {order_sn}，或您无权访问此订单。"
-        
-        # 2. 转换原因分类
+
+        # 2. 转换原因分类（直接信任 working memory 中的 enum 字面量）
         category = None
-        if reason_category: 
+        if reason_category:
             try:
                 category = RefundReason(reason_category)
             except ValueError:
                 category = RefundReason.OTHER
-        
+
         # 3. 创建退货申请（内部会自动校验资格）
         success, message, refund_app = await RefundApplicationService.create_refund_application(
             order_id=order.id,
             user_id=user_id,
-            reason_detail=reason_detail,
+            reason_detail=reason_text,
             reason_category=category,
             session=session,
             commit=False,
@@ -165,7 +193,10 @@ async def submit_refund_application(
                 risk_level=risk_level,
                 action=AuditAction.PENDING,
                 context_snapshot={
-                    "question": reason_detail,
+                    # reason_text 是用户填写的退货原因文本，audit 必须存原文而不是
+                    # collected_slots dict（否则审计回溯会变成结构化数据，违反监管
+                    # 对"原始诉求"可读性的要求）。
+                    "question": reason_text,
                     "order_data": {
                         "order_id": order.id,
                         "order_sn": order.order_sn,
@@ -176,7 +207,8 @@ async def submit_refund_application(
                     "refund": {
                         "refund_application_id": refund_app.id,
                         "refund_amount": str(refund_app.refund_amount),
-                        "reason": reason_detail,
+                        "reason": reason_text,
+                        "reason_category": category.value if category else None,
                     },
                 },
             )
@@ -191,7 +223,7 @@ async def submit_refund_application(
                     status="WAITING_ADMIN",
                     data={"risk_level": risk_level, "audit_log_id": audit_log.id, "refund_amount": refund_amount},
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 通知失败不能回滚已写入的申请和审计。
                 # 通知失败不能回滚已经创建的退款申请和审计记录。
                 print(f"[Refund tool] 审核通知失败: {exc}")
             return (
@@ -213,7 +245,7 @@ async def submit_refund_application(
 async def query_refund_status(
     user_id: Annotated[int, InjectedState("user_id")],
     refund_id: Annotated[
-        Optional[int], 
+        int | None, 
         Field(description="退货申请编号，如果不提供则返回用户所有退货申请")
     ] = None
 ) -> str:

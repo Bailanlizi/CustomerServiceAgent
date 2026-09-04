@@ -70,7 +70,6 @@ async def test_v2():
         initial_state = {
             "question": case["query"],
             "user_id": case["user_id"],
-            "history": [],
             "context": [],
             "order_data": None,
             "answer": ""

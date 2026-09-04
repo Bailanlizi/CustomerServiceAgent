@@ -62,7 +62,6 @@ async def test_v4():
             "question": case["query"],
             "user_id": case["user_id"],
             "thread_id":  thread_id,
-            "history": [],
             "context": [],
             "order_data": None,
             "intent": None,
