@@ -3,14 +3,16 @@
 退款相关异步任务
 """
 import asyncio
+import time
 from typing import Dict, Any
 from celery import Task
 from app.celery_app import celery_app
 from app.core.database import async_session_maker
 from app.models.refund import RefundApplication, RefundStatus
-from app.models.audit import AuditLog, AuditAction
+from app.models.audit import AuditLog
 from app.models.message import MessageCard, MessageType, MessageStatus
 from sqlmodel import select
+from sqlalchemy import update
 from datetime import datetime, timezone
 
 
@@ -69,55 +71,106 @@ def send_refund_sms(self, refund_id: int, phone:  str, message: str) -> Dict[str
     max_retries=3,
     default_retry_delay=120
 )
-def process_refund_payment(self, refund_id: int, amount: float, payment_method: str) -> Dict[str, Any]:
+def process_refund_payment(self, refund_id: int) -> Dict[str, Any]:
     """
     调用支付网关执行退款
     
     Args:
         refund_id:  退款申请ID
-        amount: 退款金额
-        payment_method: 支付方式
+        金额始终从数据库读取，调用方不能覆盖。
     """
-    async def _process():
-        try:
-            async with async_session_maker() as session:
-                # 查询退款申请
-                result = await session.execute(
-                    select(RefundApplication).where(RefundApplication.id == refund_id)
+    async def _claim():
+        async with async_session_maker() as session:
+            result = await session.execute(
+                update(RefundApplication)
+                .where(
+                    RefundApplication.id == refund_id,
+                    RefundApplication.status == RefundStatus.APPROVED,
                 )
-                refund = result.scalar_one_or_none()
-                
-                if not refund: 
-                    raise ValueError(f"Refund application {refund_id} not found")
-                
-                # TODO: 接入真实支付网关 (支付宝、微信支付等)
-                print(f"💰 [Payment] 退款 ¥{amount} 到 {payment_method}")
-                
-                # 模拟支付网关调用
-                import time
-                time.sleep(3)
-                
-                # 更新退款状态
-                refund.status = RefundStatus.COMPLETED
-                refund.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                session.add(refund)
-                await session.commit()
-                
-                return {
-                    "status": "success",
-                    "refund_id": refund_id,
-                    "amount": amount,
-                    "transaction_id": f"TXN{refund_id}{int(time.time())}",
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                }
-                
-        except Exception as exc:
-            print(f"  [Payment] 退款失败: {exc}")
-            raise exc
-    
+                .values(
+                    status=RefundStatus.PROCESSING,
+                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+                .returning(RefundApplication.refund_amount)
+            )
+            amount = result.scalar_one_or_none()
+            await session.commit()
+            if amount is not None:
+                return "claimed", amount
+
+            refund = await session.get(RefundApplication, refund_id)
+            if not refund:
+                raise ValueError(f"Refund application {refund_id} not found")
+            if refund.status in (RefundStatus.PROCESSING, RefundStatus.COMPLETED):
+                return "noop", refund.refund_amount
+            return "invalid", refund.refund_amount
+
+    async def _complete():
+        async with async_session_maker() as session:
+            result = await session.execute(
+                update(RefundApplication)
+                .where(
+                    RefundApplication.id == refund_id,
+                    RefundApplication.status == RefundStatus.PROCESSING,
+                )
+                .values(
+                    status=RefundStatus.COMPLETED,
+                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                raise RuntimeError(f"Refund {refund_id} left PROCESSING unexpectedly")
+            await session.commit()
+
+    async def _restore_after_failure(exc: Exception):
+        async with async_session_maker() as session:
+            await session.execute(
+                update(RefundApplication)
+                .where(
+                    RefundApplication.id == refund_id,
+                    RefundApplication.status == RefundStatus.PROCESSING,
+                )
+                .values(
+                    status=RefundStatus.APPROVED,
+                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+            )
+            audit_result = await session.execute(
+                select(AuditLog).where(AuditLog.refund_application_id == refund_id)
+            )
+            audit_log = audit_result.scalars().first()
+            if audit_log:
+                metadata = dict(audit_log.decision_metadata or {})
+                metadata.update({
+                    "payment_error": str(exc),
+                    "payment_failed_at": datetime.now(timezone.utc).isoformat(),
+                    "payment_retry": self.request.retries,
+                })
+                audit_log.decision_metadata = metadata
+                session.add(audit_log)
+            await session.commit()
+
     try:
-        return self.run_async(_process())
+        claim_status, amount = self.run_async(_claim())
+        if claim_status == "noop":
+            return {"status": "noop", "refund_id": refund_id}
+        if claim_status == "invalid":
+            return {"status": "rejected", "refund_id": refund_id}
+
+        print(f"💰 [Payment] 退款 ¥{amount} 到原支付方式")
+        time.sleep(3)
+        self.run_async(_complete())
+        return {
+            "status": "success",
+            "refund_id": refund_id,
+            "amount": float(amount),
+            "transaction_id": f"TXN{refund_id}{int(time.time())}",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
     except Exception as exc:
+        print(f"  [Payment] 退款失败: {exc}")
+        self.run_async(_restore_after_failure(exc))
         raise self.retry(exc=exc)
 
 
@@ -146,7 +199,7 @@ def notify_admin_audit(self, audit_log_id: int) -> Dict[str, Any]:
                 raise ValueError(f"Audit log {audit_log_id} not found")
             
             # TODO: 接入真实通知系统 (邮件、企业微信、钉钉等)
-            print(f"  [Notify] 通知管理员审核任务:")
+            print("  [Notify] 通知管理员审核任务:")
             print(f"  - 风险等级: {audit_log.risk_level}")
             print(f"  - 触发原因: {audit_log.trigger_reason}")
             print(f"  - 用户ID: {audit_log.user_id}")

@@ -374,6 +374,8 @@ def create_chat_interface():
                 </div>'''
             elif status == "APPROVED":
                 return '<div class="audit-card audit-card-approved"> <b>审核通过</b><br>退款流程已启动</div>'
+            elif status == "PROCESSING":
+                return '<div class="audit-card audit-card-approved"> <b>退款处理中</b><br>请稍后查询处理结果</div>'
             elif status == "REJECTED":
                 return f'<div class="audit-card audit-card-rejected"> <b>审核拒绝</b><br>{data.get("admin_comment", "无理由")}</div>'
             return ""
@@ -405,7 +407,7 @@ def create_chat_interface():
             status = status_info.get("status", "PROCESSING")
             
             # 追加漂亮的 HTML 卡片
-            if status in ["WAITING_ADMIN", "APPROVED", "REJECTED"]:
+            if status in ["WAITING_ADMIN", "APPROVED", "PROCESSING", "REJECTED"]:
                 final_content += render_audit_card_v2(status_info)
             
             history.append({"role": "assistant", "content": final_content})

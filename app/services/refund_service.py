@@ -1,8 +1,9 @@
 # app/services/refund_service.py
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.models.order import Order, OrderStatus
 from app.models.refund import RefundApplication, RefundStatus, RefundReason
@@ -82,13 +83,7 @@ class RefundEligibilityChecker:
         session: AsyncSession
     ) -> Optional[RefundApplication]: 
         """检查是否已有退货申请"""
-        stmt = select(RefundApplication).where(
-            RefundApplication.order_id == order_id,
-            RefundApplication.status. in_([  # type: ignore
-                RefundStatus. PENDING,
-                RefundStatus. APPROVED
-            ])
-        )
+        stmt = select(RefundApplication).where(RefundApplication.order_id == order_id)
         result = await session.exec(stmt)
         return result. first()
     
@@ -139,7 +134,8 @@ class RefundApplicationService:
         user_id: int,
         reason_detail: str,
         reason_category: Optional[RefundReason],
-        session: AsyncSession
+        session: AsyncSession,
+        commit: bool = True,
     ) -> Tuple[bool, str, Optional[RefundApplication]]:
         """
         创建退货申请
@@ -167,6 +163,14 @@ class RefundApplicationService:
             return False, "订单不存在或无权访问", None
         
         # ========== 步骤 2: 资格校验 ==========
+        existing_refund = await RefundEligibilityChecker._check_existing_refund(order_id, session)
+        if existing_refund:
+            return (
+                False,
+                f"该订单已存在退款申请（申请编号：{existing_refund.id}，状态：{existing_refund.status}）",
+                existing_refund,
+            )
+
         is_eligible, eligibility_msg = await RefundEligibilityChecker.check_eligibility(
             order, session
         )
@@ -188,14 +192,27 @@ class RefundApplicationService:
         
         # ========== 步骤 4: 提交事务 ==========
         try:
-            await session.commit()
-            await session.refresh(refund_app)
+            if commit:
+                await session.commit()
+                await session.refresh(refund_app)
+            else:
+                await session.flush()
             
             return True, f"退货申请已提交（申请编号：{refund_app.id}），等待审核", refund_app
             
-        except Exception as e:
+        except IntegrityError:
             await session.rollback()
-            return False, f"提交失败：{str(e)}", None
+            existing_refund = await RefundEligibilityChecker._check_existing_refund(order_id, session)
+            if existing_refund:
+                return (
+                    False,
+                    f"该订单已存在退款申请（申请编号：{existing_refund.id}，状态：{existing_refund.status}）",
+                    existing_refund,
+                )
+            return False, "退款申请提交冲突，请稍后查询申请状态", None
+        except Exception:
+            await session.rollback()
+            return False, "退款申请提交失败，请稍后重试", None
     
     @staticmethod
     async def get_user_refund_applications(

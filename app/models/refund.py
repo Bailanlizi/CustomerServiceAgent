@@ -2,14 +2,15 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
-from sqlalchemy import Column, String, text, Numeric, Text
-from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import Column, String, text, Numeric, Text, UniqueConstraint
+from sqlmodel import SQLModel, Field
 
 # 1. 退货申请状态枚举
 class RefundStatus(str, Enum):
     """退货申请状态"""
     PENDING = "PENDING"           # 待审核
     APPROVED = "APPROVED"         # 已批准
+    PROCESSING = "PROCESSING"     # 退款处理中
     REJECTED = "REJECTED"         # 已拒绝
     COMPLETED = "COMPLETED"       # 已完成（货物已收到）
     CANCELLED = "CANCELLED"       # 用户取消
@@ -27,11 +28,12 @@ class RefundReason(str, Enum):
 class RefundApplication(SQLModel, table=True):
     """退货申请表"""
     __tablename__ = "refund_applications"
+    __table_args__ = (UniqueConstraint("order_id", name="uq_refund_applications_order_id"),)
     
     id:  Optional[int] = Field(default=None, primary_key=True)
     
     # 关联订单（外键）
-    order_id: int = Field(foreign_key="orders.id", index=True, ondelete="RESTRICT")
+    order_id: int = Field(foreign_key="orders.id", ondelete="RESTRICT")
     
     # 申请用户（冗余字段，方便查询）
     user_id: int = Field(foreign_key="users.id", index=True, ondelete="RESTRICT")

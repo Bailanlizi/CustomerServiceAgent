@@ -17,10 +17,8 @@ from app.models.order import Order
 from sqlmodel import select
 from app.core.config import settings
 from app.models.audit import AuditAction, AuditLog, RiskLevel
-from app.models.refund import RefundStatus
-from app.tasks.refund_tasks import notify_admin_audit, process_refund_payment
+from app.tasks.refund_tasks import notify_admin_audit
 from app.websocket.manager import manager
-from datetime import datetime, timezone
 
 
 # ==========================================
@@ -134,39 +132,30 @@ async def submit_refund_application(
             user_id=user_id,
             reason_detail=reason_detail,
             reason_category=category,
-            session=session
+            session=session,
+            commit=False,
         )
         
         # 4. 格式化返回结果
         if success and refund_app:
             refund_amount = float(refund_app.refund_amount)
-            if refund_amount < settings.MEDIUM_RISK_REFUND_AMOUNT:
-                refund_app.status = RefundStatus.APPROVED
-                refund_app.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                session.add(refund_app)
-                await session.commit()
-                process_refund_payment.delay(
-                    refund_id=refund_app.id,
-                    amount=refund_amount,
-                    payment_method="原支付方式",
-                )
-                return (
-                    f"✅ 退货申请已自动审核通过。\n"
-                    f"申请编号：#{refund_app.id}\n退款金额：¥{refund_amount}\n"
-                    "资金将在 3-5 个工作日内原路退回，请注意查收。"
-                )
-
             risk_level = (
                 RiskLevel.HIGH
                 if refund_amount >= settings.HIGH_RISK_REFUND_AMOUNT
                 else RiskLevel.MEDIUM
+                if refund_amount >= settings.MEDIUM_RISK_REFUND_AMOUNT
+                else RiskLevel.LOW
             )
             threshold = (
                 settings.HIGH_RISK_REFUND_AMOUNT
                 if risk_level == RiskLevel.HIGH
                 else settings.MEDIUM_RISK_REFUND_AMOUNT
+                if risk_level == RiskLevel.MEDIUM
+                else 0
             )
-            trigger_reason = f"{risk_level} 风险退款申请：¥{refund_amount} (≥ ¥{threshold})"
+            trigger_reason = f"{risk_level} 风险退款申请：¥{refund_amount}"
+            if threshold:
+                trigger_reason += f" (≥ ¥{threshold})"
             audit_log = AuditLog(
                 thread_id=thread_id,
                 user_id=user_id,
@@ -195,10 +184,11 @@ async def submit_refund_application(
                 f"⏳ 退货申请已提交，需人工审核。\n"
                 f"申请编号：#{refund_app.id}\n退款金额：¥{refund_amount}\n"
                 f"风险等级：{risk_level}\n触发原因：{trigger_reason}\n"
-                "我们将在 24 小时内完成审核，您可稍后查询进度。"
+                "申请已进入人工审核，请稍后查询进度。"
             )
-        else:
-            return f"❌ 退货申请失败。\n原因：{message}"
+        if refund_app:
+            return f"❌ 该订单已有退款申请。\n{message}"
+        return f"❌ 退货申请失败。\n原因：{message}"
 
 
 # ==========================================
@@ -241,7 +231,15 @@ async def query_refund_status(
             stmt = select(Order).where(Order.id == refund.order_id)
             result = await session.exec(stmt)
             order = result.first()
-            
+
+            review_info = (
+                "审核信息：\n  - 审核时间："
+                + refund.reviewed_at.strftime("%Y-%m-%d %H:%M")
+                if refund.reviewed_at
+                else "⏳ 审核中，请耐心等待"
+            )
+            review_note = f"  - 审核备注：{refund.admin_note}" if refund.admin_note else ""
+
             return (
                 f"📋 退货申请详情（#{refund.id}）\n\n"
                 f"订单信息：\n"
@@ -252,8 +250,8 @@ async def query_refund_status(
                 f"  - 退款金额：¥{refund.refund_amount}\n"
                 f"  - 申请时间：{refund.created_at.strftime('%Y-%m-%d %H:%M')}\n"
                 f"  - 退货原因：{refund.reason_detail}\n\n"
-                f"{'审核信息：\n  - 审核时间：' + refund.reviewed_at.strftime('%Y-%m-%d %H:%M') if refund.reviewed_at else '⏳ 审核中，请耐心等待'}\n"
-                f"{('  - 审核备注：' + refund.admin_note) if refund.admin_note else ''}"
+                f"{review_info}\n"
+                f"{review_note}"
             )
         
         # 场景 2: 查询所有申请
@@ -277,6 +275,7 @@ async def query_refund_status(
                 status_emoji = {
                     "PENDING": "⏳",
                     "APPROVED": "✅",
+                    "PROCESSING": "💳",
                     "REJECTED": "❌",
                     "COMPLETED": "🎉",
                     "CANCELLED": "🚫"

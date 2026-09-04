@@ -6,42 +6,53 @@
 import sys
 from pathlib import Path
 
-# 将项目根目录注入 sys.path，使 `import app` 不受启动方式影响
-# （用 `python app/frontend/admin_dashboard.py` 启动时，sys.path[0] 是 app/frontend，
-#  顶层 app 包不可见，_init_token 里的 `from app.core.security import create_access_token` 会报
-#  No module named 'app'）。
+# 将项目根目录注入 sys.path，使 `import app` 不受启动方式影响。
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import gradio as gr
 import requests
-import json
-import time
 import os
 from typing import List, Dict, Any
-from datetime import datetime
 from gradio import themes
 
 # 配置
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
-DEFAULT_ADMIN_ID = 999  # 默认管理员ID
-
-
 class AdminClient:
     """管理员客户端"""
     
-    def __init__(self, admin_id: int = DEFAULT_ADMIN_ID):
-        self.admin_id = admin_id
+    def __init__(self):
+        self.admin_id = None
         self.token = None
-        self._init_token()
-    
-    def _init_token(self):
-        """初始化管理员 Token"""
-        from app.core.security import create_access_token
-        self.token = create_access_token(user_id=self.admin_id, is_admin=True)
-        print(f" 管理员 Token 已生成")
+
+    def login(self, username: str, password: str) -> Dict[str, Any]:
+        """通过后端登录接口获取由真实管理员账号签发的 token。"""
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/login",
+                json={"username": username, "password": password},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                self.token = None
+                self.admin_id = None
+                return {"success": False, "message": "用户名或密码错误"}
+            payload = response.json()
+            if not payload.get("is_admin"):
+                self.token = None
+                self.admin_id = None
+                return {"success": False, "message": "该账号没有管理员权限"}
+            self.token = payload["access_token"]
+            self.admin_id = payload["user_id"]
+            return {"success": True, "message": f"已登录：{payload['username']}"}
+        except Exception as exc:
+            self.token = None
+            self.admin_id = None
+            return {"success": False, "message": f"登录失败：{exc}"}
     
     def get_pending_tasks(self, risk_level: str = None) -> List[Dict[str, Any]]:
         """获取待审核任务列表"""
+        if not self.token:
+            return []
         headers = {
             "Authorization": f"Bearer {self.token}",
         }
@@ -91,7 +102,7 @@ class AdminClient:
             
             if response.status_code == 200:
                 result = response.json()
-                print(f" 决策成功")
+                print(" 决策成功")
                 return result
             else: 
                 error_msg = f"HTTP {response.status_code}"
@@ -134,6 +145,12 @@ def create_admin_dashboard():
         client_state = gr.State(None)
         tasks_state = gr.State([])
         selected_task_state = gr.State(None)
+
+        with gr.Row():
+            admin_username = gr.Textbox(label="管理员用户名")
+            admin_password = gr.Textbox(label="密码", type="password")
+            login_btn = gr.Button("登录", variant="primary")
+        login_result = gr.Markdown("*请先使用管理员账号登录*")
         
         with gr.Row():
             # === 左侧:  任务队列 ===
@@ -206,7 +223,7 @@ def create_admin_dashboard():
                 gr.Markdown("### 系统信息")
                 admin_id_display = gr.Textbox(
                     label="管理员ID",
-                    value=str(DEFAULT_ADMIN_ID),
+                    value="未登录",
                     interactive=False
                 )
                 api_status = gr.Textbox(
@@ -220,7 +237,7 @@ def create_admin_dashboard():
         def init_admin_client():
             """初始化管理员客户端"""
             try:
-                client = AdminClient(admin_id=DEFAULT_ADMIN_ID)
+                client = AdminClient()
                 
                 # 测试 API 连接
                 try:
@@ -236,6 +253,13 @@ def create_admin_dashboard():
             except Exception as e:
                 print(f" 初始化失败: {e}")
                 return None, f"错误: {str(e)}"
+
+        def login_admin(client: AdminClient, username: str, password: str):
+            client = client or AdminClient()
+            result = client.login(username, password)
+            if result["success"]:
+                return client, f"✅ {result['message']}", str(client.admin_id)
+            return client, f"❌ {result['message']}", "未登录"
         
         def load_tasks(client:  AdminClient, risk_level: str):
             """加载任务列表"""
@@ -396,6 +420,12 @@ def create_admin_dashboard():
             init_admin_client,
             outputs=[client_state, api_status]
         )
+
+        login_btn.click(
+            login_admin,
+            inputs=[client_state, admin_username, admin_password],
+            outputs=[client_state, login_result, admin_id_display],
+        )
         
         # 加载任务列表
         demo.load(
@@ -478,8 +508,6 @@ def create_admin_dashboard():
 if __name__ == "__main__":
     print(" 启动管理员工作台...")
     print(f" API 地址: {API_BASE_URL}")
-    print(f" 默认管理员ID: {DEFAULT_ADMIN_ID}")
-    
     demo = create_admin_dashboard()
     demo.queue()
     demo.launch(

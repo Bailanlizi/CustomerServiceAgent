@@ -4,16 +4,16 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone
-from app.core.security import get_current_user_id  
+from app.core.security import get_admin_user_id
 from app.core.database import async_session_maker
-from app.models.audit import AuditLog, AuditAction, RiskLevel
+from app.models.audit import AuditLog, AuditAction
 from app.models.refund import RefundApplication, RefundStatus
 from app.models.message import MessageCard, MessageType, MessageStatus
 from app.websocket.manager import manager
 from app.tasks.refund_tasks import process_refund_payment, send_refund_sms
-from sqlmodel import select, desc, or_
+from sqlmodel import select, desc
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class AuditTask(BaseModel):
 
 class AdminDecisionRequest(BaseModel):
     """管理员决策请求"""
-    action: str  # "APPROVE" | "REJECT"
+    action: Literal["APPROVE", "REJECT"]
     admin_comment: Optional[str] = None
 
 
@@ -48,7 +48,7 @@ class AdminDecisionResponse(BaseModel):
 @router.get("/admin/tasks", response_model=List[AuditTask])
 async def get_pending_tasks(
     risk_level: Optional[str] = None,
-    current_admin_id: int = Depends(get_current_user_id)  # TODO: 改为管理员认证
+    current_admin_id: int = Depends(get_admin_user_id)
 ):
     """
     获取待审核任务列表
@@ -90,7 +90,7 @@ async def get_pending_tasks(
 async def admin_decision(
     audit_log_id: int,
     request: AdminDecisionRequest,
-    current_admin_id: int = Depends(get_current_user_id)  # TODO: 改为管理员认证
+    current_admin_id: int = Depends(get_admin_user_id)
 ):
     """
     管理员决策接口
@@ -103,9 +103,9 @@ async def admin_decision(
         admin_comment:  管理员备注
     """
     async with async_session_maker() as session:
-        # 1. 查询审计日志
+        # 始终先锁审核记录，再锁退款记录，确保并发审批顺序一致。
         result = await session.execute(
-            select(AuditLog).where(AuditLog.id == audit_log_id)
+            select(AuditLog).where(AuditLog.id == audit_log_id).with_for_update()
         )
         audit_log = result.scalar_one_or_none()
         
@@ -117,58 +117,52 @@ async def admin_decision(
         
         if audit_log.action != AuditAction.PENDING: 
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This audit has already been processed"
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该申请已被处理"
             )
-        
-        # 2. 更新审计日志
+
+        if not audit_log.refund_application_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="审核任务未关联退款申请",
+            )
+
+        refund_result = await session.execute(
+            select(RefundApplication)
+            .where(RefundApplication.id == audit_log.refund_application_id)
+            .with_for_update()
+        )
+        refund = refund_result.scalar_one_or_none()
+        if not refund:
+            raise HTTPException(status_code=404, detail="Refund application not found")
+        if refund.status != RefundStatus.PENDING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该申请已被处理",
+            )
+
         action_enum = AuditAction.APPROVE if request.action == "APPROVE" else AuditAction.REJECT
+        reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         audit_log.action = action_enum
         audit_log.admin_id = current_admin_id
         audit_log.admin_comment = request.admin_comment
-        audit_log.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        
+        audit_log.reviewed_at = reviewed_at
         session.add(audit_log)
-        
-        # 3. 更新退款申请状态
-        if audit_log.refund_application_id:
-            refund_result = await session.execute(
-                select(RefundApplication).where(
-                    RefundApplication.id == audit_log.refund_application_id
-                )
-            )
-            refund = refund_result.scalar_one_or_none()
-            
-            if refund:
-                if action_enum == AuditAction.APPROVE:
-                    refund.status = RefundStatus.APPROVED
-                    refund.admin_note = request.admin_comment
-                    refund.reviewed_by = current_admin_id
-                    refund.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                    
-                    # 4. 触发异步任务：退款 + 短信通知
-                    process_refund_payment.delay(
-                        refund_id=refund.id,
-                        amount=float(refund.refund_amount),
-                        payment_method="原支付方式"
-                    )
-                    
-                    send_refund_sms.delay(
-                        refund_id=refund.id,
-                        phone="138****1234",  # TODO: 从用户表获取
-                        message=f"您的退款申请已通过，退款金额¥{refund.refund_amount}将在3-5个工作日退回。"
-                    )
-                    
-                else: 
-                    refund.status = RefundStatus.REJECTED
-                    refund.admin_note = request.admin_comment
-                    refund.reviewed_by = current_admin_id
-                    refund.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                
-                session.add(refund)
+
+        refund.status = (
+            RefundStatus.APPROVED if action_enum == AuditAction.APPROVE else RefundStatus.REJECTED
+        )
+        refund.admin_note = request.admin_comment
+        refund.reviewed_by = current_admin_id
+        refund.reviewed_at = reviewed_at
+        session.add(refund)
         
         # 5. 创建状态变更消息卡片
-        status_message = " 审核通过，资金将在3-5个工作日内原路退回" if action_enum == AuditAction.APPROVE else f" 审核未通过: {request.admin_comment}"
+        status_message = (
+            "审核通过，退款已进入处理队列"
+            if action_enum == AuditAction.APPROVE
+            else f"审核未通过: {request.admin_comment}"
+        )
         
         message_card = MessageCard(
             thread_id=audit_log.thread_id,
@@ -188,16 +182,41 @@ async def admin_decision(
         session.add(message_card)
         
         await session.commit()
-        
-        # 6. 通过 WebSocket 实时推送状态变更
-        await manager.notify_status_change(
-            thread_id=audit_log.thread_id,
-            status=request.action,
-            data={
-                "message": status_message,
-                "admin_comment": request.admin_comment,
-            }
-        )
+
+        dispatch_errors: list[str] = []
+        if action_enum == AuditAction.APPROVE:
+            try:
+                process_refund_payment.delay(refund_id=refund.id)
+            except Exception as exc:
+                dispatch_errors.append(f"payment: {exc}")
+            try:
+                send_refund_sms.delay(
+                    refund_id=refund.id,
+                    phone="138****1234",  # TODO: 从用户表获取
+                    message=f"您的退款申请已通过，退款金额¥{refund.refund_amount}已进入处理队列。",
+                )
+            except Exception as exc:
+                dispatch_errors.append(f"sms: {exc}")
+
+        try:
+            await manager.notify_status_change(
+                thread_id=audit_log.thread_id,
+                status=request.action,
+                data={"message": status_message, "admin_comment": request.admin_comment},
+            )
+        except Exception as exc:
+            dispatch_errors.append(f"websocket: {exc}")
+
+        if dispatch_errors:
+            async with async_session_maker() as error_session:
+                error_audit = await error_session.get(AuditLog, audit_log_id)
+                if error_audit:
+                    metadata = dict(error_audit.decision_metadata or {})
+                    metadata["dispatch_errors"] = dispatch_errors
+                    metadata["dispatch_failed_at"] = datetime.now(timezone.utc).isoformat()
+                    error_audit.decision_metadata = metadata
+                    error_session.add(error_audit)
+                    await error_session.commit()
         
         return AdminDecisionResponse(
             success=True,

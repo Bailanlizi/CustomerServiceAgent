@@ -1,10 +1,11 @@
 # app/core/security.py
 import jwt
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 from fastapi import HTTPException, status, Depends
 from fastapi.security import OAuth2PasswordBearer
 from app.core.config import settings
+from app.core.database import async_session_maker
+from app.models.user import User
 
 # 设置 Token 获取的 URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
@@ -111,7 +112,7 @@ async def get_current_user_id_ws(token: str) -> int:
         )
 
 
-def get_admin_user_id(token: str = Depends(oauth2_scheme)) -> int:
+async def get_admin_user_id(token: str = Depends(oauth2_scheme)) -> int:
     """
     管理员认证依赖项
     
@@ -127,8 +128,6 @@ def get_admin_user_id(token: str = Depends(oauth2_scheme)) -> int:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
-        is_admin: bool = payload.get("is_admin", False)
-        
         if user_id is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -136,13 +135,25 @@ def get_admin_user_id(token: str = Depends(oauth2_scheme)) -> int:
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        if not is_admin:
+        try:
+            parsed_user_id = int(user_id)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: invalid user ID",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        async with async_session_maker() as session:
+            user = await session.get(User, parsed_user_id)
+
+        if not user or not user.is_admin or not user.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Admin privileges required"
             )
-        
-        return int(user_id)
+
+        return parsed_user_id
     
     except jwt.ExpiredSignatureError:
         raise HTTPException(
