@@ -3,7 +3,7 @@
 管理员 API
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone
 from app.core.security import get_admin_user_id
@@ -35,6 +35,12 @@ class AdminDecisionRequest(BaseModel):
     """管理员决策请求"""
     action: Literal["APPROVE", "REJECT"]
     admin_comment: Optional[str] = None
+
+    @model_validator(mode="after")
+    def reject_requires_comment(self):
+        if self.action == "REJECT" and not (self.admin_comment or "").strip():
+            raise ValueError("拒绝退款时必须填写审核备注")
+        return self
 
 
 class AdminDecisionResponse(BaseModel):

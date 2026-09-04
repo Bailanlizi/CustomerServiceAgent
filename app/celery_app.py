@@ -25,6 +25,12 @@ celery_app.conf.update(
     task_soft_time_limit=240,  # 4分钟软超时
     worker_prefetch_multiplier=4,
     worker_max_tasks_per_child=1000,
+    beat_schedule={
+        "recover-stalled-refunds": {
+            "task": "refund.recover_stalled",
+            "schedule": 60.0,
+        },
+    },
 )
 
 # 自动发现任务

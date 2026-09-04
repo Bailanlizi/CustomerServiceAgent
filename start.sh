@@ -29,6 +29,10 @@ echo " 启动 Celery Worker..."
 uv run celery -A app.celery_app worker --loglevel=info --concurrency=4 --pool=solo &
 CELERY_PID=$!
 
+echo " 启动 Celery Beat..."
+uv run celery -A app.celery_app beat --loglevel=info &
+CELERY_BEAT_PID=$!
+
 sleep 3
 
 echo " 启动用户界面..."
@@ -51,5 +55,5 @@ echo ""
 echo " 按 Ctrl+C 停止所有服务"
 
 # 等待中断信号
-trap "kill $FASTAPI_PID $CELERY_PID $UI_PID $ADMIN_PID; exit" INT
+trap "kill $FASTAPI_PID $CELERY_PID $CELERY_BEAT_PID $UI_PID $ADMIN_PID; exit" INT
 wait

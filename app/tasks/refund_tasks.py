@@ -13,7 +13,8 @@ from app.models.audit import AuditLog
 from app.models.message import MessageCard, MessageType, MessageStatus
 from sqlmodel import select
 from sqlalchemy import update
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from app.core.config import settings
 
 
 class DatabaseTask(Task):
@@ -172,6 +173,64 @@ def process_refund_payment(self, refund_id: int) -> Dict[str, Any]:
         print(f"  [Payment] 退款失败: {exc}")
         self.run_async(_restore_after_failure(exc))
         raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    bind=True,
+    base=DatabaseTask,
+    name="refund.recover_stalled",
+)
+def recover_stalled_refunds(self) -> Dict[str, Any]:
+    """Recover refunds abandoned in PROCESSING by a crashed worker."""
+    async def _recover():
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            minutes=settings.REFUND_PROCESSING_TIMEOUT_MINUTES
+        )
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(RefundApplication)
+                .where(
+                    RefundApplication.status == RefundStatus.PROCESSING,
+                    RefundApplication.updated_at < cutoff,
+                )
+                .with_for_update(skip_locked=True)
+            )
+            refunds = result.scalars().all()
+            recovered_ids = []
+            for refund in refunds:
+                refund.status = RefundStatus.APPROVED
+                refund.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(refund)
+                audit_result = await session.execute(
+                    select(AuditLog).where(AuditLog.refund_application_id == refund.id)
+                )
+                audit_log = audit_result.scalars().first()
+                if audit_log:
+                    metadata = dict(audit_log.decision_metadata or {})
+                    metadata.update({
+                        "payment_error": "退款处理超时，已恢复为待重新处理状态",
+                        "payment_failed_at": datetime.now(timezone.utc).isoformat(),
+                        "payment_recovered_by": "refund.recover_stalled",
+                    })
+                    audit_log.decision_metadata = metadata
+                    session.add(audit_log)
+                recovered_ids.append(refund.id)
+            await session.commit()
+            return recovered_ids
+
+    recovered_ids = self.run_async(_recover())
+    requeue_errors = {}
+    for refund_id in recovered_ids:
+        try:
+            process_refund_payment.delay(refund_id=refund_id)
+        except Exception as exc:
+            # Keep APPROVED so the next scheduled sweep can safely retry dispatch.
+            requeue_errors[str(refund_id)] = str(exc)
+    return {
+        "status": "success",
+        "recovered_refund_ids": recovered_ids,
+        "requeue_errors": requeue_errors,
+    }
 
 
 @celery_app.task(

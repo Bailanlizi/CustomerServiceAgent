@@ -52,6 +52,19 @@ services:
       - ./app:/app/app
     restart: unless-stopped
 
+  celery_beat:
+    build: .
+    container_name: ecommerce_celery_beat
+    command: celery -A app.celery_app beat --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+    restart: unless-stopped
+
   # FastAPI 应用
   app:
     build: .

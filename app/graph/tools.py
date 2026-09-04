@@ -164,7 +164,21 @@ async def submit_refund_application(
                 trigger_reason=trigger_reason,
                 risk_level=risk_level,
                 action=AuditAction.PENDING,
-                context_snapshot={"order_sn": order_sn, "reason": reason_detail},
+                context_snapshot={
+                    "question": reason_detail,
+                    "order_data": {
+                        "order_id": order.id,
+                        "order_sn": order.order_sn,
+                        "status": str(order.status),
+                        "total_amount": str(order.total_amount),
+                        "items": order.items,
+                    },
+                    "refund": {
+                        "refund_application_id": refund_app.id,
+                        "refund_amount": str(refund_app.refund_amount),
+                        "reason": reason_detail,
+                    },
+                },
             )
             session.add(audit_log)
             await session.commit()

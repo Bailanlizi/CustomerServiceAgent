@@ -13,20 +13,18 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 ALGORITHM = "HS256"
 
 
-def create_access_token(user_id: int, is_admin: bool = False) -> str:
+def create_access_token(user_id: int) -> str:
     """
     生成 JWT Token
     
     Args: 
         user_id: 用户ID
-        is_admin:  是否为管理员
     """
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode = {
         "sub": str(user_id), 
         "exp": expire,
         "iat": datetime.now(timezone.utc),
-        "is_admin": is_admin,  # v4.0 新增：区分管理员权限
     }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
