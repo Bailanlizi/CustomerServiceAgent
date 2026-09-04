@@ -3,6 +3,15 @@
 基于 Gradio 的 B 端管理员工作台 - v4.0
 支持任务队列、会话回放、一键决策
 """
+import sys
+from pathlib import Path
+
+# 将项目根目录注入 sys.path，使 `import app` 不受启动方式影响
+# （用 `python app/frontend/admin_dashboard.py` 启动时，sys.path[0] 是 app/frontend，
+#  顶层 app 包不可见，_init_token 里的 `from app.core.security import create_access_token` 会报
+#  No module named 'app'）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import gradio as gr
 import requests
 import json
@@ -474,7 +483,7 @@ if __name__ == "__main__":
     demo = create_admin_dashboard()
     demo.queue()
     demo.launch(
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=7861,
         share=False,
         show_error=True

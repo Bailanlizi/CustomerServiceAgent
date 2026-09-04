@@ -25,7 +25,9 @@ services:
     image: redis/redis-stack-server:latest
     container_name: ecommerce_redis
     ports:
-      - "6379:6379"
+      # 宿主 6380 -> 容器 6379。注意：Windows 本机可能已有老旧原生 redis(3.0.504)占用 6379 且无 JSON 模块，
+      # 会导致 LangGraph checkpointer 的 JSON.SET 报错。改用 6380 绕开冲突，应用通过 REDIS_PORT 连接。
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:

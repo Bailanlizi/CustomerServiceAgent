@@ -1,20 +1,29 @@
 # app/graph/nodes.py
 import asyncio
-from typing import List, Literal
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from typing import Any, Literal
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, SecretStr, ValidationError
+from sqlmodel import select
+
 from app.core.config import settings
 from app.core.database import async_session_maker
-from app.models.knowledge import KnowledgeChunk
-from app.models.order import Order
 from app.graph.state import AgentState
-from sqlmodel import select
-from pydantic import BaseModel, SecretStr
-from langchain_core.messages import AIMessage, BaseMessage
 from app.graph.tools import refund_tools
-from app.services.policy_retrieval import QwenEmbeddings, embedding_model, load_policy_rules, retrieve_policy
-
+from app.models.order import Order
+from app.services.policy_answer_guard import (
+    INTERNAL_LLM_TAG,
+    NO_EVIDENCE_FALLBACK,
+    POLICY_GUARD_TAG,
+    SAFE_POLICY_FALLBACK,
+    PolicyAnswer,
+    PolicyCitationValidationError,
+    allowed_evidence_ids,
+    validate_policy_answer,
+)
+from app.services.policy_retrieval import load_policy_rules, retrieve_policy
 
 # 相似度阈值：只有距离 < 0.5 才认为相关
 SIMILARITY_THRESHOLD = 0.5
@@ -49,6 +58,17 @@ User Question:
 
 prompt = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
 
+POLICY_GENERATE_SYSTEM_PROMPT = """
+你是电商客服的政策回答助手。只能依据提供的政策证据回答，不得补充、猜测或承诺证据中不存在的内容。
+
+请使用给定的结构化输出：
+1. answer 是面向用户的自然语言回答，不要在其中展示条款编号。
+2. applied_clause_ids 填直接用于结论的条款编号。
+3. evidence_clause_ids 填支撑解释的全部条款编号，必须包含 applied_clause_ids。
+4. 两个条款列表只能使用“允许引用编号”中的值。
+5. 若没有足够证据，请明确说明暂无法依据当前政策作出确定承诺，并返回空的条款列表。
+"""
+
 # ==========================================
 # 节点函数定义
 # ==========================================
@@ -64,12 +84,29 @@ async def retrieve(state: AgentState) -> dict:
         retrieve_policy(question, similarity_threshold=SIMILARITY_THRESHOLD),
         load_policy_rules(),
     )
-    valid_chunks = [chunk.content for chunk in retrieved]
+    policy_evidence = [
+        {
+            "content": chunk.content,
+            "source": chunk.source,
+            "clause_ids": chunk.clause_ids,
+            "canonical_clause_ids": chunk.canonical_clause_ids,
+            "source_type": chunk.source_type,
+            "rank": chunk.rank,
+            "distance": chunk.distance,
+        }
+        for chunk in retrieved
+    ]
+    # 保留旧字段，避免订单与非政策生成路径发生行为变化。
+    valid_chunks = [item["content"] for item in policy_evidence]
     for chunk in retrieved:
         print(f"   - {chunk.clause_ids or ['未标注条款']}: {chunk.content[:10]}... | 距离分: {chunk.distance:.4f}")
 
     print(f" [Retrieve] 最终有效记录: {len(valid_chunks)} 条")
-    return {"context": valid_chunks, "policy_rules": policy_rules}
+    return {
+        "context": valid_chunks,
+        "policy_evidence": policy_evidence,
+        "policy_rules": policy_rules,
+    }
 
 
 # Generate 节点的 System Prompt
@@ -83,8 +120,118 @@ GENERATE_SYSTEM_PROMPT = """
 4. 严禁编造数据库中不存在的订单状态。
 """
 
+policy_answer_llm = llm.with_structured_output(PolicyAnswer).with_config(
+    {"tags": [POLICY_GUARD_TAG]}
+)
+
+
+def _format_policy_evidence(evidence: list[dict[str, Any]]) -> str:
+    """将结构化检索结果呈现给模型，同时保留合法 ID 的可见边界。"""
+    parts = []
+    for item in evidence:
+        ids = list(item.get("clause_ids", [])) + list(item.get("canonical_clause_ids", []))
+        parts.append(
+            f"【来源：{item.get('source', '未知')} | 类型：{item.get('source_type', 'policy')} | "
+            f"允许编号：{', '.join(ids) or '无'}】\n{item.get('content', '')}"
+        )
+    return "\n\n".join(parts) or "暂无相关参考信息。"
+
+
+RETRY_FEEDBACK_TEMPLATE = (
+    "你上一次的回答未通过引用校验，错误原因：{error}\n"
+    "请重新生成：applied_clause_ids 与 evidence_clause_ids 只能使用[允许引用编号]中的值，"
+    "applied_clause_ids 必须是 evidence_clause_ids 的子集，且 answer 中不得出现任何条款编号。"
+)
+
+
+async def _generate_verified_policy_answer(state: AgentState) -> dict:
+    """生成政策回答；仅在引用校验通过后将答案交给 API 输出。"""
+    evidence: list[dict[str, Any]] = list(state.get("policy_evidence", []))
+
+    # 无检索证据时不再让模型自由生成：直接返回确定性安全答复，
+    # 从源头杜绝“检索不到 → 仍作出承诺”的过度承诺路径（空证据下引用校验会全部空转）。
+    if not evidence:
+        return {
+            "answer": NO_EVIDENCE_FALLBACK,
+            "policy_answer_audit": {
+                "status": "no_evidence",
+                "applied_clause_ids": [],
+                "evidence_clause_ids": [],
+                "allowed_evidence_ids": [],
+                "retry_count": 0,
+            },
+        }
+
+    allowed_ids = allowed_evidence_ids(evidence)
+    policy_rules = state.get("policy_rules", [])
+    context = _format_policy_evidence(evidence)
+    if policy_rules:
+        context += "\n\n【政策适用优先级背景】\n" + "\n".join(policy_rules)
+
+    messages = [
+        SystemMessage(content=POLICY_GENERATE_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"[政策证据]\n{context}\n\n"
+            f"[允许引用编号]\n{', '.join(allowed_ids) or '无'}\n\n"
+            f"[用户问题]\n{state['question']}"
+        )),
+    ]
+
+    last_error: str | None = None
+    for attempt in range(2):
+        attempt_messages = list(messages)
+        if last_error is not None:
+            # 把校验失败的具体原因反馈给模型，提高重试成功率。
+            attempt_messages.append(
+                HumanMessage(content=RETRY_FEEDBACK_TEMPLATE.format(error=last_error))
+            )
+        try:
+            raw_answer = await policy_answer_llm.ainvoke(attempt_messages)
+            candidate = PolicyAnswer.model_validate(raw_answer)
+            verified = validate_policy_answer(
+                candidate,
+                allowed_ids,
+                evidence_present=True,
+            )
+            return {
+                "answer": verified.answer,
+                "policy_answer_audit": {
+                    "status": "passed",
+                    "applied_clause_ids": verified.applied_clause_ids,
+                    "evidence_clause_ids": verified.evidence_clause_ids,
+                    "allowed_evidence_ids": allowed_ids,
+                    "retry_count": attempt,
+                },
+            }
+        except (PolicyCitationValidationError, ValidationError) as exc:
+            last_error = str(exc)
+            print(f" [PolicyGuard] 第 {attempt + 1} 次引用校验失败: {exc}")
+        except Exception as exc:  # noqa: BLE001 - 任何解析异常都必须阻止未校验回答输出。
+            # 结构化响应解析失败时同样不得回退到未经校验的自由文本。
+            last_error = f"{type(exc).__name__}: {exc}"
+            print(f" [PolicyGuard] 第 {attempt + 1} 次结构化生成失败: {last_error}")
+
+    return {
+        "answer": SAFE_POLICY_FALLBACK,
+        "policy_answer_audit": {
+            "status": "fallback",
+            "applied_clause_ids": [],
+            "evidence_clause_ids": [],
+            "allowed_evidence_ids": allowed_ids,
+            "retry_count": 1,
+        },
+    }
+
 async def generate(state: AgentState) -> dict:
     print(" [Generate] 正在生成综合回复...")
+
+    # 政策答复必须在输出到 SSE 前完成结构化引用校验。
+    if state.get("intent") == "POLICY":
+        result = await _generate_verified_policy_answer(state)
+        # 回写 AI 消息：保证会话历史 Human/AI 成对，否则后续退款 Agent 会看到
+        # 连续多条无人回复的用户消息，从而把旧问题一并重复作答。
+        result["messages"] = [AIMessage(content=result["answer"])]
+        return result
     
     # 1. 组装参考信息
     context_parts = []
@@ -147,7 +294,12 @@ async def generate(state: AgentState) -> dict:
     async for chunk in llm.astream(messages):
         response = chunk if response is None else response + chunk
 
-    return {"answer": response.content if response else ""}
+    answer = response.content if response else ""
+    return {
+        "answer": answer,
+        # 同上：回写 AI 消息，维持 Human/AI 交替的合法会话结构。
+        "messages": [AIMessage(content=answer)],
+    }
 
 
 # 意图识别的 System Prompt
@@ -174,7 +326,9 @@ class IntentDecision(BaseModel):
     intent: Literal["ORDER", "POLICY", "REFUND", "OTHER"]
 
 
-intent_classifier = llm.with_structured_output(IntentDecision)
+intent_classifier = llm.with_structured_output(IntentDecision).with_config(
+    {"tags": [INTERNAL_LLM_TAG]}
+)
 
 
 async def intent_router(state: AgentState):
@@ -183,10 +337,12 @@ async def intent_router(state: AgentState):
     """
     print(f" [Router] 正在分析意图:  {state['question']}")
     
-    decision = await intent_classifier.ainvoke([
-        SystemMessage(content=INTENT_PROMPT),
-        HumanMessage(content=state["question"])
-    ])
+    decision = await intent_classifier.ainvoke(
+        [
+            SystemMessage(content=INTENT_PROMPT),
+            HumanMessage(content=state["question"]),
+        ]
+    )
     intent = decision.intent
         
     print(f" [Router] 识别结果: {intent}")
@@ -247,14 +403,45 @@ async def query_order(state: AgentState):
 
 REFUND_AGENT_PROMPT = """你是电商售后助手。必须使用工具获取或改变退款数据，不能编造任何订单、申请或审核结果。
 根据用户请求选择一个工具：资格预检用 check_refund_eligibility；明确申请退款/退货用 submit_refund_application；查询进度用 query_refund_status。
-如果缺少工具所需的订单号、退款原因或申请编号，请直接向用户索要该信息，不要调用工具。工具返回后，用简洁中文说明结果。"""
+如果缺少工具所需的订单号、退款原因或申请编号，请直接向用户索要该信息，不要调用工具。工具返回后，用简洁中文说明结果。
+
+回答范围约束：
+1. 只回答用户最新一条消息。历史消息仅用于理解指代（如“它”“这个订单”），不要重复回答已经回复过的旧问题。
+2. 只处理售后范围内的请求。订单物流查询、通用政策咨询等非售后问题若历史中已回复过，直接忽略；未回复的请说明你只负责售后，不要越权作答。"""
+
+
+# 退款 Agent 最多携带的历史轮数。跨意图历史（订单查询、政策咨询）无限堆积会让模型
+# 把旧问题一并重复作答，这里限制为最近若干轮。
+MAX_REFUND_HISTORY_TURNS = 3
+
+
+def select_refund_context_messages(
+    messages: list[BaseMessage], question: str
+) -> list[BaseMessage]:
+    """为退款 Agent 选取安全的历史窗口。
+
+    两个约束：
+    1. 只保留最近 MAX_REFUND_HISTORY_TURNS 轮，避免无关的跨意图历史干扰当前售后流程；
+    2. 窗口起点必须是一条 HumanMessage——否则可能把带 tool_calls 的 AIMessage
+       与其配对的 ToolMessage 拆开，触发模型 API 报错。
+    """
+    if not messages:
+        return [HumanMessage(content=question)]
+
+    human_indexes = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if not human_indexes:
+        return [HumanMessage(content=question)]
+
+    # 从倒数第 MAX_REFUND_HISTORY_TURNS 条用户消息开始；历史不足时退化为从第一条开始。
+    start = human_indexes[max(len(human_indexes) - MAX_REFUND_HISTORY_TURNS, 0)]
+    return list(messages[start:])
 
 
 async def refund_agent(state: AgentState) -> dict:
     """退款 Agent：模型自主选择受控工具，身份信息由 ToolNode 注入。"""
-    messages: List[BaseMessage] = state.get("messages", [])
-    if not messages:
-        messages = [HumanMessage(content=state["question"])]
+    messages: list[BaseMessage] = select_refund_context_messages(
+        list(state.get("messages", [])), state["question"]
+    )
 
     response = None
     async for chunk in llm.bind_tools(refund_tools).astream(

@@ -1,11 +1,14 @@
 # app/api/v1/chat.py
 import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from app.core.security import get_current_user_id
-from app.api.v1.schemas import ChatRequest
-from langchain_core.runnables import RunnableConfig 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
+
+from app.api.v1.schemas import ChatRequest
+from app.core.security import get_current_user_id
+from app.services.policy_answer_guard import INTERNAL_LLM_TAG, POLICY_GUARD_TAG
 
 router = APIRouter()
 
@@ -58,6 +61,11 @@ async def chat(
                 
                 # 只处理 LLM 流式输出
                 if kind == "on_chat_model_stream":
+                    # 内部结构化 LLM（意图识别、政策生成等）的中间 token 绝不直接输出：
+                    # 既要防止未校验的 JSON 片段泄露，也要避免误置 token_sent 吞掉真正的答案。
+                    tags = event.get("tags", [])
+                    if POLICY_GUARD_TAG in tags or INTERNAL_LLM_TAG in tags:
+                        continue
                     data = event.get("data")
                     if data and isinstance(data, dict):
                         chunk = data.get("chunk")

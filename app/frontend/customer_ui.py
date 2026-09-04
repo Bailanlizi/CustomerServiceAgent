@@ -3,6 +3,14 @@
 基于 Gradio 的 C 端用户界面 - v4.0
 支持真实登录、多用户切换、横向越权测试
 """
+import sys
+from pathlib import Path
+
+# 将项目根目录注入 sys.path，使 `import app` 不受启动方式影响
+# （用 `python app/frontend/customer_ui.py` 启动时，sys.path[0] 是 app/frontend，
+#  顶层 app 包不可见，会导致 No module named 'app'）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import gradio as gr
 import requests
 import json
@@ -454,7 +462,7 @@ if __name__ == "__main__":
     demo = create_chat_interface()
     demo.queue()
     demo.launch(
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=7860,
         share=False,
         show_error=True

@@ -1,13 +1,19 @@
 # app/graph/workflow.py
-import redis.asyncio as redis
-from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.redis import AsyncRedisSaver
+from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
-from app.graph.state import AgentState
-from app.graph.nodes import retrieve, generate, intent_router, query_order, refund_agent, should_call_refund_tool
-from app.graph.tools import refund_tools
-from app.core.config import settings
 
+from app.core.config import settings
+from app.graph.nodes import (
+    generate,
+    intent_router,
+    query_order,
+    refund_agent,
+    retrieve,
+    should_call_refund_tool,
+)
+from app.graph.state import AgentState
+from app.graph.tools import refund_tools
 
 app_graph = None
 
@@ -76,10 +82,15 @@ async def compile_app_graph():
     编译 LangGraph，初始化 Redis checkpointer
     """
     print("🔧 Compiling LangGraph with Redis checkpointer...")
-    
+
     # 使用 Redis URL 创建 checkpointer（AsyncRedisSaver 接受 redis_url: str）
     checkpointer = AsyncRedisSaver(redis_url=settings.REDIS_URL)
-    
+
+    # 必须先建索引：checkpointer 依赖 Redis 的 checkpoint / checkpoint_write 两个
+    # 搜索索引读写会话状态。缺少这一步，首次写入会以
+    # "Error while searching: No such index checkpoint_write" 失败（包内文档明确要求调用）。
+    await checkpointer.asetup()
+
     # 编译图
     compiled_graph = workflow.compile(checkpointer=checkpointer)
     
