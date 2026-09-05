@@ -1,242 +1,238 @@
-# 🤖 E-commerce Smart Agent：可审计的电商客服 Agent
+# E-commerce Smart Agent
 
-## 🌟 项目定位
+面向电商售后场景的**可审计、可控、可持续对话**客服 Agent。项目将大模型用于意图理解、信息抽取和受限话术生成；订单数据、退款资格、权限判断、状态迁移与资金操作均由后端确定性逻辑控制。
 
-电商客服 AI 最普遍的通病是**虚假承诺 / 过度承诺**：模型给出"AI 说包退、人工说不行"的答复，无法给出政策依据，出了问题也无法追溯责任。本项目是一个针对该痛点的**可审计客服 Agent**：
+它不是一个只会生成文本的聊天机器人，而是一个可连接业务事实、按流程执行，并能为关键结论保留证据与审计记录的客服系统。
 
-- **依据真实**：政策回答只能基于向量检索召回的条款，检索层全链路保留条款编号（`clause_ids`）与来源信息；
-- **引用可校验**：政策回答采用结构化生成（`answer + applied_clause_ids + evidence_clause_ids`），后端执行确定性校验 `applied ⊆ evidence ⊆ 检索条款集合`，非法引用在输出前被拦截；
-- **失败安全降级**：校验不通过时携带错误原因重试一次，仍失败则返回固定安全答复，绝不让未经校验的承诺触达用户；
-- **连续会话不串**：退款流程中用户补订单号 / 原因时不被重新分类，已确认事实与摘要跨域切换不丢失。
+## 项目定位
 
-在此基础上，系统提供完整的客服业务闭环：订单查询、政策咨询、退货退款申请（受控工具 + 统一人工审核）、管理员工作台，并用一套 45 题的条款级评测集对 RAG 质量做量化度量。
+电商客服中的高风险问题通常不是“答不上来”，而是模型在无依据时承诺退款、引用不存在的条款，或在多轮会话中丢失订单与退款流程上下文。本项目聚焦这些问题，提供三个业务闭环：
 
-## 🚀 主要特性
+- **订单查询**：基于当前登录用户进行订单检索和归属校验，拦截越权查询。
+- **政策咨询**：从条款级知识库检索证据，生成前执行引用合法性校验；无可靠证据时安全拒答。
+- **退货退款**：通过显式 FSM 收集订单号、原因与用户确认，创建申请后进入管理员审核；支付任务以幂等方式异步执行。
 
-*   **政策回答 Guardrail（核心亮点）**：结构化生成 + 确定性引用校验 + 安全降级，从机制上堵死"编造条款号 / 检索不到仍作承诺"两类风险（详见下节）。
-*   **来源感知检索排序**：政策文档按 4 层来源建模（正式条款 > FAQ，FAQ 通过 canonical 映射关联正式条款），检索结果带相似度阈值过滤（distance < 0.5）与权威重排。
-*   **领域工作流拆分（P3 落地）**：主图为薄编排器（Thin Orchestrator），按 `active_domain` 派发到 `OrderWorkflow` / `RefundWorkflow` 子图或 `retrieve → generate` 单节点；`IntentRouter` 仅在无活跃域或歧义时调用。各 workflow 自合成答案、不二次 LLM 改写；模块级子图编译一次复用，避免每轮重建。ORDER→POLICY / REFUND 切换不丢旧流程摘要与 `active_order_id`。
-*   **退货申请流程**：退款 Agent 自主选择受控工具（资格预检 / 提交申请 / 进度查询），缺参数时主动向用户索要；用户身份由 `InjectedState` 注入，越权查询被数据库层拦截。
-*   **退款安全闭环（资金操作全人工 + 幂等防重）**：所有退款申请不分金额统一进入人工审核，资金移动必须管理员批准；订单级唯一约束杜绝重复退款，支付任务以条件更新实现幂等抢占与卡死自动恢复，全程写入审计日志。
-*   **工具能力治理（ToolRegistry / GuardedToolExecutor / ToolOutcome）**：所有工具（含 LangChain `@tool` 薄壳）经统一的 `ToolCapabilityRegistry` 注册与 `GuardedToolExecutor` 路由，Guard 按域 / 阶段 / 槽位 / 资格 / 用户确认 5 步确定性校验，模型误调用直接结构化拒绝；`ToolOutcome` 由 Registry 自动 envelope 9 项审计元数据（`tool_name` / `domain` / `workflow_stage` / `conversation_id` / `thread_id` / `user_id` / `order_id` / `timestamp` / `idempotency_key`），FSM / 审计 / 管理员队列共享同一字段源；写工具按 `idempotency_key_template` 在 Registry 进程内缓存成功 outcome（双层短路之一），管理员审计列表用 `WHERE thread_id IN (...)` 批量加载 `ConversationSession` 消除 N+1。
-*   **实时状态同步**：通过 WebSocket 实现用户和管理员界面的实时状态更新。
-*   **管理员工作台**：Gradio 构建的 B 端界面，支持任务队列、会话回放、一键决策。
-*   **异步任务处理**：Celery 处理退款支付、短信通知等耗时操作。
-*   **RAG 评测体系**：45 题条款级测试集，覆盖 6 个难度维度，度量 hit@5 / clause_recall@5 / MRR@5 / 引用精确率及 RAGAS faithfulness（judge 模型与业务模型隔离）。
+系统同时提供用户端聊天界面、管理员审核工作台、SSE 流式响应、WebSocket 状态推送，以及登录后自动恢复最近会话与完整聊天记录的能力。
 
-## 🛡️ 政策回答 Guardrail 闭环
+## 核心能力
 
-POLICY 意图路径的完整证据链（`app/graph/nodes.py` + `app/services/policy_answer_guard.py`）：
+### 有证据约束的政策回答
+
+政策路径采用“检索 → 结构化生成 → 确定性校验 → 输出”的链路：
 
 ```text
-用户问题
-   │
-   ▼
-retrieve 节点：向量检索 top-20 → 阈值过滤 → 权威重排 → top-5
-   │  结构化证据（正文 / clause_ids / canonical_clause_ids / 来源 / 排名 / 距离）完整写入 state
-   ▼
-无证据？ ── 是 ──► 直接返回"暂未查询到相关规定"（不调用 LLM，零成本短路）
-   │ 否
-   ▼
-生成节点：with_structured_output 产出 {answer, applied_clause_ids, evidence_clause_ids}
-   │
-   ▼
-确定性校验（纯代码，不依赖模型自觉）：
-   1. applied ⊆ evidence（实际适用条款必须是证据子集）
-   2. evidence ⊆ 检索返回的 clause_ids ∪ canonical_clause_ids
-   3. 用户可见 answer 中不得出现任何条款编号
-   4. 有证据时引用列表不得为空
-   │
-   ▼
-校验失败 ──► 携带具体错误原因重试一次 ── 仍失败 ──► 固定安全答复（fallback）
-   │ 通过
-   ▼
-答案经 SSE 整体下发（结构化生成调用打 policy_guard 标签，中间 token 一律不外泄）
+用户问题 → 条款级向量检索与权威重排 → 结构化答案
+                                      ↓
+                          引用集合确定性校验
+                                      ↓
+                       通过后输出 / 失败后安全降级
 ```
 
-每轮回答的审计记录（状态、applied / evidence / allowed 三元组、重试次数）随 LangGraph Redis checkpoint 持久化，可事后查证每条承诺的依据。
+- 检索结果保存条款编号、规范条款映射、来源、排序与距离等证据元数据；
+- 模型输出 `answer`、`applied_clause_ids`、`evidence_clause_ids`；
+- 后端校验“适用条款 ⊆ 证据条款 ⊆ 本轮检索条款”，并禁止将条款编号直接暴露给用户；
+- 无证据不调用生成模型；校验失败仅重试一次，仍失败则返回固定的安全答复。
 
-**当前边界（如实声明）**：Guardrail 保证的是"引用合法、可追溯"，不校验自然语言语义是否被条款完全支持；审计记录暂存于会话 checkpoint（随会话过期），尚未落独立审计表。
+### 受控的退款与资金流程
 
-## 🛡️ 退款安全（资金操作全人工 + 幂等防重）
+- 退款子工作流按 `IDLE → IDENTIFY_ORDER → COLLECT_REASON → ELIGIBILITY_CHECKED → WAITING_CONFIRMATION → SUBMITTED` 推进；
+- 工具调用统一经过能力注册表与 Guard，检查领域、阶段、必填槽位、资格与用户确认；
+- 退款申请具有订单级唯一约束，写入操作使用幂等键，避免重复申请；
+- 所有退款申请均进入人工审核；管理员审批使用数据库回查权限、条件更新和审计日志；
+- Celery 支付任务以状态条件更新抢占执行，并支持处理超时后的恢复扫描。
 
-退款涉及资金移动，系统以「Agent 只采集信息与创建申请，资金移动必须人工批准 + 幂等执行」为原则，构建四层防护：
+> 当前支付逻辑为模拟实现，尚未接入真实支付网关。接入前应补齐支付流水、网关幂等键和第三方交易号持久化。
 
-- **申请层（防重复）**：`refund_applications.order_id` 物理唯一约束 + 服务层全状态拦截，同一订单只允许一个退款案件，并发提交由 `IntegrityError` 兜底。
-- **审批层（防越权 + 防并发）**：管理端接口改用数据库回查 `users.is_admin/is_active` 鉴权（JWT 不再签发角色 claim），审批在事务内以行锁 + 条件更新原子执行，两个管理员同时批准只有一次成功；拒绝必须携带非空审核理由。
-- **支付层（防重复执行）**：支付任务只接收 `refund_id`、金额从数据库读取，通过条件更新 `APPROVED → PROCESSING → COMPLETED` 实现原子抢占；`PROCESSING` 卡死由 Celery Beat 每分钟扫描恢复为 `APPROVED` 并重新投递。
-- **审计层（可追溯）**：所有退款申请（不分金额）统一创建 `AuditLog`，审核快照含订单号、状态、金额与商品明细，状态流转全程留痕。
+### 多轮会话与领域工作流
 
-退款业务由 6 阶段 FSM 子图（`OrderWorkflow`）驱动：`IDLE → IDENTIFY_ORDER → COLLECT_REASON → ELIGIBILITY_CHECKED → WAITING_CONFIRMATION → SUBMITTED`，每个阶段只做一件事，槽位最多主动询问一次；提交走 GuardedToolExecutor 的工具调用与进程内幂等键双层短路。
-
-**当前边界（如实声明）**：退款支付为 mock 实现（模拟打印 + 延时），尚未接入真实支付网关。接入真实支付前必须补 `RefundPayment` 支付流水表、网关幂等键与第三方交易号持久化，否则 Celery 重试可能造成真实重复打款。
-
-## 🧭 领域工作流与跨域连续性
-
-主图是**薄编排器**（`app/graph/workflow.py`），自身不承载业务细节，按 `active_domain` 派发到对应 workflow 子图：
+主图是 Thin Orchestrator：仅负责加载会话记忆、选择业务域并安全处理领域切换；订单和退款作为独立子图运行，单步的政策问答保持 RAG + Guardrail 路径。
 
 ```text
-START
-  │
-  ▼
-dispatch_router（按 active_domain 条件派发）
-  │
-  ├── ORDER     → OrderWorkflow 子图（query_order → 自合成 answer）
-  ├── POLICY    → retrieve → generate（结构化政策回答 + Guardrail）
-  ├── REFUND    → refund_agent → RefundWorkflow 子图（6 阶段 FSM）
-  └── 无活跃域/歧义 → intent_router → route_intent → 对应子图
+                ┌─ OrderWorkflow
+用户输入 → 调度器 ├─ Policy Retrieval + Guardrail
+                └─ RefundWorkflow（FSM）
 ```
 
-设计原则（取自 `docs/architecture-update.md` 第 2 节）：
+会话同时维护短期消息、结构化工作记忆、会话摘要和数据库业务事实。用户重新登录后，`GET /api/v1/chat/session` 会恢复该账号的最近会话和聊天记录；会话 ID 仍用于复用 LangGraph checkpoint，因此订单归属、退款阶段和已收集信息能够延续。
 
-1. **原始消息 → 工作记忆 → 业务事实**三层各司其职，互不替代；
-2. **对话流程状态 ↔ 退款业务状态 ↔ 审核动作**三类分别维护，禁止双状态机；
-3. **LLM 负责理解、槽位抽取、受限话术；确定性代码负责状态迁移、工具前置条件、副作用**——同上一节的 Guardrail；
-4. **只为多步骤、有独立状态的领域建立子工作流**（订单 / 退款），不为单步政策问答拆工作流；
-5. **Orchestrator 必须保持薄**——只读工作记忆、选 workflow、处理安全切换。
+### 审计与运营界面
 
-跨域连续性由 `ConversationStateManager.prepare_turn` 维护：用户补充订单号 / 退款原因时不被重新路由；切换域时旧流程摘要与已确认订单归属保留在 `ConversationSession.working_memory_json`，由 `persist_turn` 持久化。
+- 每次受控工具调用生成统一的 `ToolOutcome`，带工具名、领域、阶段、会话、用户、订单、时间和幂等键等元数据；
+- 退款申请及审核决策写入审计日志，管理员可查看待办、会话上下文和风险信息；
+- 用户端与管理员端均为 Gradio 界面，状态变化可通过 WebSocket 同步。
 
-## 🧠 多轮会话历史的一致性
-
-`AgentState.messages` 经 Redis checkpoint 跨轮累积，消费它的是退款 Tool Agent，因此历史必须是**合法的 Human/AI 交替序列**——否则模型会把历史中"没有回复过的用户消息"当作待答问题，一次性复述作答。为此锁定两条不变量（回归见 `test/test_conversation_history.py`）：
-
-1. **每轮必回写**：订单查询 / 政策咨询走对应子图或 `generate` 节点，除返回 `answer` 外必须以 `AIMessage` 回写本轮回复，保证每条用户消息都有配对的助手回复。
-2. **历史窗口受控**：退款 Agent 最多携带最近 3 轮（`MAX_REFUND_HISTORY_TURNS`），且窗口起点固定为一条 `HumanMessage`——否则会把带 `tool_calls` 的 `AIMessage` 与其配对的 `ToolMessage` 拆开，触发模型 API 报错。
-
-窗口只裁剪跨意图的无关历史（如之前的订单查询、政策咨询），退款流程自身的连续性（"我要退 SN20240001" → "质量问题，鞋底开胶"）不受影响。跨域切换时 `conversation_summary` 与 `active_order_id` 由 `persist_turn` 固化，ORDER→REFUND 链路不丢订单归属。
-
-## 🏗️ 项目结构
+## 架构与目录
 
 ```text
-├── app # 主应用目录
-│   ├── api # API 接口定义
-│   │   └── v1
-│   │       ├── admin.py # 管理员 API (获取任务, 决策)
-│   │       ├── chat.py # 聊天接口 (SSE 流式返回, Guardrail 标签过滤, 兜底捕获 order_workflow 节点)
-│   │       ├── schemas.py # 请求/响应 Pydantic 模型
-│   │       ├── status.py # 状态查询 API
-│   │       └── websocket.py # WebSocket 连接端点
-│   ├── core # 配置 / 数据库 / JWT 认证
-│   ├── evaluation # 评测模块
-│   │   ├── metrics.py # 条款级检索与引用指标 (hit/recall/MRR/precision)
-│   │   └── chinese_ragas_prompts.py # RAGAS faithfulness 中文化 judge prompt
-│   ├── frontend # Gradio 前端 (用户聊天 + 管理员工作台)
-│   ├── graph # LangGraph 核心逻辑
-│   │   ├── nodes.py # 节点定义 (intent_router, retrieve, generate, refund_agent)
-│   │   ├── state.py # 图状态 (含 policy_evidence / policy_answer_audit / working memory)
-│   │   ├── tool_registry.py # ToolCapability Registry + GuardedToolExecutor + ToolOutcome + 审计钩子
-│   │   ├── tools.py # core_* handler + LangChain @tool 薄壳 (薄壳路由到 Registry，question 通过 arguments 转发)
-│   │   ├── workflow.py # Thin Orchestrator (dispatch_router 按 active_domain 派发到各子图)
-│   │   └── workflows/ # 领域子图（模块级编译一次复用）
-│   │       ├── refund.py # RefundWorkflow (6 阶段 FSM: IDLE → IDENTIFY_ORDER → ... → SUBMITTED)
-│   │       └── order.py # OrderWorkflow (query_order → 自合成 answer; order_data 字段映射 order_id→id)
-│   ├── models # SQLModel ORM (订单, 知识库块, 退款, 审计, 消息卡片)
-│   ├── services # 业务服务层
-│   │   ├── policy_answer_guard.py # 政策回答引用校验 (确定性 Guardrail)
-│   │   ├── policy_chunks.py # 政策文档条款级解析与标注
-│   │   ├── policy_retrieval.py # 向量检索 + 来源感知权威重排
-│   │   └── refund_service.py # 退款业务逻辑
-│   ├── tasks # Celery 异步任务 (退款支付, 短信, 管理员通知)
-│   └── main.py # FastAPI 入口
-├── data # 政策知识库源文档 (6 个 Markdown, 含条款编号与优先级标注)
-├── eval # 评测资产
-│   ├── testset.json # 45 题条款级测试集 (6 难度维度 × 标注期望条款)
-│   └── runs # 评测运行产物 (JSON)
-├── scripts
-│   ├── etl_policy.py # 知识库 ETL (解析 + Embedding 入库)
-│   ├── run_rag_baseline.py # 检索基线评测 (hit/recall/MRR/precision)
-│   ├── evaluate_ragas.py # RAGAS faithfulness 评测 (judge 隔离)
-│   └── seed_data.py / seed_large_data.py # 种子数据
-├── test # 单元与回归测试 (Guardrail 校验, SSE, 条款解析, 退款规则/工具, OrderWorkflow 等)
-├── docker-compose.yaml # PostgreSQL(pgvector) + Redis + FastAPI + Celery
-├── migrations # Alembic 迁移脚本
-├── start.sh / start_worker.sh # 启动脚本
+app/
+├── api/v1/              # 认证、聊天 SSE、会话恢复、状态、管理端与 WebSocket API
+├── conversation/        # 会话解析、工作记忆、摘要压缩与聊天记录持久化
+├── core/                # 配置、数据库、JWT 鉴权
+├── graph/               # LangGraph 调度器、节点、工具注册表与领域子图
+│   └── workflows/       # OrderWorkflow、RefundWorkflow
+├── models/              # 用户、订单、退款、会话、消息、知识库与审计 ORM 模型
+├── services/            # 政策检索/Guardrail、退款服务
+├── tasks/               # Celery 支付、通知与恢复任务
+└── frontend/            # 用户聊天界面与管理员工作台
+data/                    # 政策知识库源文档
+scripts/                 # ETL、种子数据、检索与 RAGAS 评测脚本
+migrations/              # Alembic 数据库迁移
+test/                    # 单元与回归测试
+eval/                    # 45 题条款级评测集及历史评测产物
 ```
 
-## 🛠️ 技术栈
+## 技术栈
 
-*   **Python / FastAPI**：REST API + WebSocket 服务。
-*   **LangChain / LangGraph**：Agent 编排、意图识别、RAG、多步骤工作流；Redis 作为会话 Checkpointer；P3 起主图为薄编排器，Order / Refund 各自独立子图。
-*   **SQLModel + PostgreSQL (pgvector)**：数据模型与向量存储。
-*   **结构化输出（`with_structured_output`）**：意图分类与政策回答均使用受限 schema，不依赖自由文本解析。
-*   **Redis**：缓存、Celery broker、LangGraph checkpoint。
-*   **Celery**：退款支付、短信通知等异步任务。
-*   **Gradio**：用户聊天界面与管理员工作台。
-*   **JWT (PyJWT)**：认证与授权。
-*   **OpenAI API / Qwen (通义千问)**：LLM 与 Embedding（适配器接入）。
-*   **RAGAS**：faithfulness 评测（judge 模型与业务模型隔离，避免自评偏置）。
-*   **Docker / Docker Compose / Alembic**：容器化部署与数据库迁移。
+- Python 3.10–3.13、FastAPI、Uvicorn、Pydantic Settings
+- LangChain、LangGraph、Redis Checkpointer
+- SQLModel、PostgreSQL + pgvector、Alembic
+- OpenAI-compatible LLM / Embedding API（默认配置可使用通义千问兼容接口）
+- Redis、Celery、WebSocket、SSE
+- Gradio、JWT、Passlib/bcrypt
+- RAGAS 与自定义条款级检索指标
 
-## ✅ P3 验收要点
+## 快速开始
 
-P3（领域工作流拆分）实际落地情况：
+### 前置条件
 
-- **OrderWorkflow 子图**：从主图扁平节点迁出，独立 `query_order → compose_answer` 子图，`order_data` 字段映射 `order_id → id`，确保 `persist_turn` 固化 `active_order_id`。
-- **Thin Orchestrator**：`workflow.compile()``` 起步即派发，按 `active_domain` 直接路由到对应子图；`IntentRouter` 仅在无活跃域 / 歧义时调用。
-- **per-name 幂等注册**：`_register_capabilities` 不再用全局 guard，refund / order 两模块的注册互不阻断；重复 import 不抛错。
-- **SSE 兜底**：`on_chain_end` 捕获集合加入 `order_workflow`，无 LLM 流的 ORDER 路径通过 fallback answer 也能送达前端。
-- **测试**：`test/test_order_workflow.py`（12 用例）+ 既有 54 用例，共 **66 用例全过**；主图编译回归（`test_main_workflow_compiles`）覆盖 `workflow.compile()`。
+- Python 3.10–3.13
+- [uv](https://docs.astral.sh/uv/)
+- Docker Desktop（用于 PostgreSQL + pgvector 和 Redis）
+- 一个 OpenAI-compatible LLM 与 Embedding API 的访问凭据
 
-设计细节见 `docs/architecture-update.md`（设计真源）。
+### 1. 配置环境变量
 
-## 📊 评测体系
+在项目根目录创建 `.env`。以下字段为应用启动所需配置；请使用自己的真实值，勿提交到版本库。
 
-测试集 `eval/testset.json` 共 45 题，按 6 个难度维度设计（层级冲突、多跳综合、品类边界、抗幻觉、量化细节、FAQ），每题标注期望命中条款，`field_spec` 约定首个来源为主权威条款。
+```dotenv
+PROJECT_NAME=E-commerce Smart Agent
+API_V1_STR=/api/v1
 
-**当前基线**（评测产物见 `eval/runs/`）：
+POSTGRES_SERVER=localhost
+POSTGRES_PORT=5433
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your-password
+POSTGRES_DB=knowledge_base
 
-| 指标 | 数值 | 说明 |
-|---|---|---|
-| primary_hit@5 / any_hit@5 | 1.000 / 1.000 | 期望条款全部进入 top-5 |
-| clause_recall@5 | 0.9815 | 标注条款覆盖率 |
-| MRR@5 | 0.8685 | 排序质量，短板集中在层级冲突类问题 |
-| answer_primary_hit | 0.9556 | 回答中正确引用主权威条款 |
-| faithfulness (RAGAS) | 0.9091 | 回答对检索证据的忠实度 |
+REDIS_HOST=localhost
+REDIS_PORT=6380
 
-复现方式：
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
+OPENAI_API_KEY=your-api-key
+LLM_MODEL=qwen-plus
+EMBEDDING_MODEL=text-embedding-v3
+EMBEDDING_DIM=1024
+
+SECRET_KEY=replace-with-a-long-random-secret
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+```
+
+如需运行 RAGAS 评测，请额外配置 `JUDGE_OPENAI_BASE_URL`、`JUDGE_OPENAI_API_KEY` 和 `JUDGE_LLM_MODEL`，并使用与业务生成模型隔离的 judge 模型。
+
+### 2. 初始化依赖与数据
 
 ```bash
-python scripts/run_rag_baseline.py   # 检索侧: hit / recall / MRR / precision
-python scripts/evaluate_ragas.py     # 生成侧: RAGAS faithfulness
-```
-
-## ⚡ 快速开始
-
-本项目使用 **uv** 管理依赖（非 Poetry），`.venv` 由 `uv sync` 创建。
-
-```bash
-# 1. 启动基础设施 (PostgreSQL+pgvector, Redis)
-docker-compose up -d db redis
-
-# 2. 安装依赖 (生成/复用 .venv)
 uv sync
-
-# 3. 配置 .env (LLM/Embedding 的 API Key 等), 然后数据库迁移 + 知识库入库 + 种子数据
+docker compose up -d db redis
 uv run alembic upgrade head
 uv run python scripts/etl_policy.py
 uv run python scripts/seed_data.py
-
-# 4. 启动服务
-uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-uv run celery -A app.celery_app worker --loglevel=info --pool=solo
 ```
 
-访问地址：API `http://localhost:8000`（文档 `/docs`）· 用户界面 `http://localhost:7860` · 管理员工作台 `http://localhost:7861`
+默认端口为 PostgreSQL `5433`、Redis `6380`，用于避开 Windows 本机常见的 `5432/6379` 占用情况。
 
-## 📸 界面演示
+### 3. 启动服务
+
+请在独立终端中执行：
+
+```bash
+# API
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Celery Worker
+uv run celery -A app.celery_app worker --loglevel=info --concurrency=4 --pool=solo
+
+# Celery Beat（退款处理超时恢复）
+uv run celery -A app.celery_app beat --loglevel=info
+
+# 用户端界面
+uv run python app/frontend/customer_ui.py
+
+# 管理员工作台
+uv run python app/frontend/admin_dashboard.py
+```
+
+访问：
+
+- API 与 Swagger：`http://localhost:8000` / `http://localhost:8000/docs`
+- 用户端：`http://localhost:7860`
+- 管理员工作台：`http://localhost:7861`
+- 健康检查：`GET http://localhost:8000/health`
+
+项目还提供 `start.sh` 以便在类 Unix 环境一次启动本地服务。Docker 编排文件描述了基础设施与服务拓扑；本地开发建议先按以上命令启动数据库、Redis 和应用进程。
+
+## 主要 API
+
+所有 `/api/v1` 接口（除注册、登录外）使用 `Authorization: Bearer <token>`。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/v1/register` | 注册用户并获取令牌 |
+| `POST` | `/api/v1/login` | 登录并获取令牌 |
+| `GET` | `/api/v1/me` | 获取当前用户信息 |
+| `GET` | `/api/v1/chat/session` | 恢复当前用户最近会话及消息记录 |
+| `POST` | `/api/v1/chat` | SSE 流式客服对话；支持 `conversation_id` 与退款确认标志 |
+| `GET` | `/api/v1/status/{thread_id}` | 查询任务状态 |
+| `GET` | `/api/v1/admin/tasks` | 获取管理员审核队列 |
+| `POST` | `/api/v1/admin/resume/{audit_log_id}` | 提交管理员审核决策 |
+
+以 Swagger 文档为准获取完整请求与响应 schema。
+
+## 质量与评测
+
+运行回归测试：
+
+```bash
+uv run pytest -q
+```
+
+测试覆盖认证与用户隔离、订单/退款规则、工具 Guard 与审计元数据、政策引用校验、SSE 输出、领域工作流及会话历史恢复等关键路径。
+
+政策评测集位于 `eval/testset.json`，共 45 题，覆盖层级冲突、多跳、品类边界、抗幻觉、量化细节和 FAQ 等维度：
+
+```bash
+uv run python scripts/run_rag_baseline.py
+uv run python scripts/evaluate_ragas.py
+```
+
+仓库中保留的历史基线结果显示：`primary_hit@5 = 1.000`、`clause_recall@5 = 0.9815`、`MRR@5 = 0.8685`、RAGAS faithfulness 为 `0.9091`。这些是特定数据与模型配置下的历史结果，不应视为生产环境承诺。
+
+## 当前边界与后续方向
+
+- 政策 Guardrail 校验引用集合的合法性与可追溯性，不等同于对自然语言语义做形式化证明；
+- 退款支付目前是 mock，尚不具备真实资金通道接入条件；
+- 暂未引入多会话列表、会话搜索、客服工单/SLA、人工实时接管和长期用户画像；
+- 生产部署前还应收紧 CORS、替换默认基础设施密码、使用密钥管理、接入真实监控告警与支付网关。
+
+## 界面示例
 
 ### 订单查询
+
 <img src="assets/image/order_query.png" width="600" alt="订单查询" />
 
 ### 退货申请
+
 <img src="assets/image/refund_apply.png" width="600" alt="退货申请" />
 
 ### 政策咨询
+
 <img src="assets/image/policy_ask.png" width="600" alt="政策咨询" />
 
 ### 意图识别
+
 <img src="assets/image/intent_detect.png" width="600" alt="意图识别" />
 
-### 非法查询他人订单（越权拦截）
+### 越权订单查询拦截
+
 <img src="assets/image/illegal_query.png" width="600" alt="非法查询" />
