@@ -1,43 +1,54 @@
 # app/graph/workflow.py
-"""主图：意图路由 + 顶层 ToolNode（已接入 Guard）。
+"""主图：Thin Orchestrator（P3）。
 
-P2 architecture:
-  * `refund_tools` / `order_tools` 在 `app/graph/tools.py` 中已经全部走
-    `GuardedToolExecutor.invoke(...)` 路由到 `ToolCapabilityRegistry`，
-    因此顶层 LangChain `ToolNode(refund_tools + order_tools)` 自动满足
-    PLAN 1.1 的"不允许任何路径绕过 Guard"要求。
-  * `RefundWorkflow` 内部继续通过 `GuardedToolExecutor` 直接调用 core
-    handlers，避免 free-form ToolNode 嵌入带来的循环控制问题。
-  * `query_order` 节点在主图仍以图节点身份存在（不是 LangChain 工具），
-    用于业务流转；其底层 SQL 行为由 `core_query_order` 统一暴露给 Registry，
-    未来若要把 `query_order` 也以 LangChain 工具方式暴露给 LLM，可直接
-    使用 `app.graph.tools.query_order_tool`。
+职责（对齐 docs/architecture-update.md 第 3.1 节）：
+  * 加载 `ConversationSession`（由 chat.py 在调用前完成）；
+  * 读 `active_domain`，按域派发到对应 workflow 子图或单节点；
+  * `IntentRouter` 仅在 `active_domain` 为 None / 歧义时调用；
+  * 不直接执行退款规则、不查询订单、不生成第二遍话术。
+
+子图节点名固定为：
+  - `order_workflow`：OrderWorkflow 子图（P3 新建）
+  - `refund_agent`：RefundWorkflow 子图（P1 已落地，P3 改为模块级编译一次复用）
+  - `retrieve` / `generate`：POLICY/OTHER 单节点
 """
 from langgraph.checkpoint.redis import AsyncRedisSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 
 from app.core.config import settings
-from app.graph.nodes import (
-    generate,
-    intent_router,
-    query_order,
-    refund_agent,
-    retrieve,
-    should_call_refund_tool,
-)
+from app.graph.nodes import generate, intent_router, refund_agent, retrieve
 from app.graph.state import AgentState
-from app.graph.tools import order_tools, refund_tools
+from app.graph.workflows.order import get_order_subgraph
+
+# 模块加载即编译一次（无 checkpointer，stateless per invoke）。
+ORDER_SUBGRAPH = get_order_subgraph()
 
 app_graph = None
 
 
-# 1. 定义路由逻辑
-def route_intent(state: AgentState):
-    """意图路由"""
+# 1. 派发路由：读 active_domain 派发到对应 workflow
+def dispatch_router(state: AgentState) -> str:
+    """按 active_domain 派发到 OrderWorkflow / retrieve / refund_agent。
+
+    - active_domain 已有 ORDER/POLICY/REFUND：直接派发（避免重复分类）。
+    - None 或未识别：进入 intent_router 分类。
+    """
+    active = state.get("active_domain")
+    if active == "ORDER":
+        return "order_workflow"
+    if active == "POLICY":
+        return "retrieve"
+    if active == "REFUND":
+        return "refund_agent"
+    return "classify"
+
+
+# 2. 意图路由：仅在无 active_domain / 歧义时由 dispatch_router 送入。
+def route_intent(state: AgentState) -> str:
+    """意图路由（首轮分类后派发）"""
     intent = state.get("intent")
     if intent == "ORDER":
-        return "query_order"
+        return "order_workflow"
     elif intent == "POLICY":
         return "retrieve"
     elif intent == "REFUND":
@@ -45,53 +56,52 @@ def route_intent(state: AgentState):
     return "generate"
 
 
-# 2. 构建图 (只定义结构，不编译)
+# 3. 构建图（只定义结构，不编译）
 workflow = StateGraph(AgentState)
 
-# 添加所有节点
-workflow.add_node("intent_router", intent_router)
+# 节点
+workflow.add_node("order_workflow", ORDER_SUBGRAPH)
 workflow.add_node("retrieve", retrieve)
-workflow.add_node("query_order", query_order)
 workflow.add_node("refund_agent", refund_agent)
-# 顶层 ToolNode：refund_tools 与 order_tools 内部已通过 GuardedToolExecutor
-# 路由到 ToolCapabilityRegistry；因此 LLM 的 tool_call 也会经过 Guard 校验
-# （domain / stage / eligibility / user_confirmed / idempotency）。
-workflow.add_node("refund_tools", ToolNode(refund_tools + order_tools))
 workflow.add_node("generate", generate)
+workflow.add_node("intent_router", intent_router)
 
-# 设置入口
-workflow.add_edge(START, "intent_router")
+# 入口与派发
+workflow.add_edge(START, "dispatch_router")
 
-# 意图路由
+# P3-1: 将 dispatch_router 建模为条件边
+def _route_dispatch(state: AgentState) -> str:
+    return dispatch_router(state)
+
+
+workflow.add_conditional_edges(
+    "dispatch_router",
+    _route_dispatch,
+    {
+        "order_workflow": "order_workflow",
+        "retrieve": "retrieve",
+        "refund_agent": "refund_agent",
+        "classify": "intent_router",
+    },
+)
+
+# 各类终点
+workflow.add_edge("order_workflow", END)
+workflow.add_edge("retrieve", "generate")
+workflow.add_edge("generate", END)
+workflow.add_edge("refund_agent", END)
+
+# intent_router → route_intent 派发
 workflow.add_conditional_edges(
     "intent_router",
     route_intent,
     {
-        "query_order": "query_order",
+        "order_workflow": "order_workflow",
         "retrieve": "retrieve",
         "refund_agent": "refund_agent",
-        "generate": "generate"
-    }
+        "generate": "generate",
+    },
 )
-
-# 订单查询后 -> 生成回复
-workflow.add_edge("query_order", "generate")
-
-# 知识检索后 -> 生成回复
-workflow.add_edge("retrieve", "generate")
-
-workflow.add_conditional_edges(
-    "refund_agent",
-    should_call_refund_tool,
-    {
-        "refund_tools": "refund_tools",
-        "done": END,
-    }
-)
-workflow.add_edge("refund_tools", "refund_agent")
-
-# 生成回复后结束
-workflow.add_edge("generate", END)
 
 
 async def compile_app_graph():

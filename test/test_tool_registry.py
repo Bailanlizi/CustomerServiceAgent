@@ -492,19 +492,35 @@ def test_query_refund_status_registered():
 
 
 def test_query_order_registered_with_order_domain():
-    refund_module._register_capabilities()
-    cap = refund_module.tool_registry.get("query_order_tool")
+    """P3: query_order_tool 注册归属已从 refund.py 迁到 order.py。
+    验证它挂在 ORDER domain 且 owner_workflow=OrderWorkflow。
+    """
+    from app.graph.workflows import order as order_module
+
+    order_module._register_capabilities()
+    cap = order_module.tool_registry.get("query_order_tool")
     assert cap.domain == "ORDER"
+    assert cap.owner_workflow == "OrderWorkflow"
     assert "user_id" in cap.required_slots
 
 
 def test_all_refund_tools_are_in_registry():
+    """P3: query_order_tool 已迁至 order.py；本测试覆盖 REFUND 三件 + ORDER 一件，
+    各自从对应模块的 Registry 读取。
+    """
+    from app.graph.workflows import order as order_module
+
     refund_module._register_capabilities()
-    for tool in (check_refund_eligibility, submit_refund_application, query_refund_status, query_order_tool):
+    order_module._register_capabilities()
+    for tool in (check_refund_eligibility, submit_refund_application, query_refund_status):
         name = tool.name
         # LangChain StructuredTool 用 `name` 属性暴露原 @tool name。
         cap = refund_module.tool_registry.get(name)
         assert cap is not None
+    # ORDER 能力由 order_module 注册
+    cap = order_module.tool_registry.get(query_order_tool.name)
+    assert cap is not None
+    assert cap.domain == "ORDER"
 
 
 # ============================================================

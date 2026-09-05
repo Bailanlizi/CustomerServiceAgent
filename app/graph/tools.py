@@ -48,13 +48,14 @@ _executor = GuardedToolExecutor()
 def _ensure_capabilities_registered() -> None:
     """Lazy registration so LangChain ToolNode 调用前 Registry 必有相应能力。
 
-    Importing `app.graph.workflows.refund` would register all 4 capabilities;
-    but tests / scripts that only import `tools` should still see Guard rules.
-    Importing here is intentional (模块级一次性副作用).
+    Importing `app.graph.workflows.refund` 与 `app.graph.workflows.order` 会分别注册
+    REFUND 与 ORDER 两组能力；两者均按 per-name 幂等，避免重复 import 时重复注册。
     """
+    from app.graph.workflows import order as _order
     from app.graph.workflows import refund as _refund
 
     _refund._register_capabilities()
+    _order._register_capabilities()
 
 
 # ==========================================================
@@ -634,7 +635,7 @@ async def query_order_tool(
     """
     _ensure_capabilities_registered()
     outcome = await _executor.invoke(
-        "query_order",
+        "query_order_tool",
         state={
             "user_id": user_id,
             "active_order_sn": active_order_sn,

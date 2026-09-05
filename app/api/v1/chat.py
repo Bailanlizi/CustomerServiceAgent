@@ -126,7 +126,7 @@ async def chat(
 
                 # astream 正常会发送 on_chat_model_stream；保留节点结果兜底，
                 # 兼容不发送 token 事件的 OpenAI 兼容网关。
-                elif kind == "on_chain_end" and event.get("name") in {"generate", "refund_agent"}:
+                elif kind == "on_chain_end" and event.get("name") in {"generate", "refund_agent", "order_workflow"}:
                     output = event.get("data", {}).get("output", {})
                     if isinstance(output, dict) and output.get("answer"):
                         fallback_answer = output["answer"]

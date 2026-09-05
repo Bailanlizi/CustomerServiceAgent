@@ -100,7 +100,8 @@ retrieve 节点：向量检索 top-20 → 阈值过滤 → 权威重排 → top-
 │   │   ├── tools.py # core_* handler + LangChain @tool 薄壳（薄壳路由到 Registry）
 │   │   ├── workflow.py # 工作流编排与编译
 │   │   └── workflows/ # 领域子图
-│   │       └── refund.py # RefundWorkflow（IDLE→IDENTIFY_ORDER→COLLECT_REASON→ELIGIBILITY_CHECKED→WAITING_CONFIRMATION→SUBMITTED）
+│   │       ├── refund.py # RefundWorkflow（IDLE→IDENTIFY_ORDER→COLLECT_REASON→ELIGIBILITY_CHECKED→WAITING_CONFIRMATION→SUBMITTED）
+│   │       └── order.py # OrderWorkflow（query_order → 自合成 answer，P3 新建）
 │   ├── models # SQLModel ORM (订单, 知识库块, 退款, 审计, 消息卡片)
 │   ├── services # 业务服务层
 │   │   ├── policy_answer_guard.py # 政策回答引用校验 (确定性 Guardrail)

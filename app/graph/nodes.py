@@ -6,12 +6,9 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, SecretStr, ValidationError
-from sqlmodel import select
 
 from app.core.config import settings
-from app.core.database import async_session_maker
 from app.graph.state import AgentState
-from app.models.order import Order
 from app.services.policy_answer_guard import (
     INTERNAL_LLM_TAG,
     NO_EVIDENCE_FALLBACK,
@@ -234,45 +231,13 @@ async def generate(state: AgentState) -> dict:
     
     # 1. 组装参考信息
     context_parts = []
-    
+
     # 加入政策背景
     if state.get("context"):
         context_parts.append("【相关政策】:\n" + "\n".join(state["context"]))
 
     if state.get("intent") == "POLICY" and state.get("policy_rules"):
         context_parts.append("【政策适用优先级】:\n" + "\n".join(state["policy_rules"]))
-    
-    # 加入订单背景
-    if state.get("order_data"):
-        order_raw = state["order_data"]
-        if hasattr(order_raw, "model_dump"):
-            order = order_raw.model_dump()
-        else:
-            order = order_raw or {}
-
-        def safe_get(d, *keys, default=None):
-            if not isinstance(d, dict):
-                return default
-            for k in keys:
-                if k in d and d[k] is not None: 
-                    return d[k]
-            return default
-
-        order_sn = safe_get(order, "order_sn", "sn", default="未知")
-        status = safe_get(order, "status", default="未知")
-        amount = safe_get(order, "total_amount", "amount", default=0)
-        tracking = safe_get(order, "tracking_number", "tracking", "shipping_address", default=None)
-        items = safe_get(order, "items", default=[])
-
-        order_str = (
-            f"【订单详情】:\n"
-            f"- 订单号: {order_sn}\n"
-            f"- 当前状态: {status}\n"
-            f"- 订单金额: {amount} 元\n"
-            f"- 收货地址: {tracking or '暂无'}\n"
-            f"- 商品明细:  {items}"
-        )
-        context_parts.append(order_str)
 
     context_info = "\n\n".join(context_parts) if context_parts else "暂无相关参考信息。"
 
@@ -355,57 +320,8 @@ async def intent_router(state: AgentState):
     print(f" [Router] 识别结果: {intent}")
     return {"intent": intent}
 
-async def query_order(state: AgentState):
-    """
-    订单查询节点：从数据库查数据
-    """
-    question = state["question"]
-    user_id = state["user_id"]
-    
-    import re
-    order_sn_match = re.search(r'SN\d+', question.upper())
-    
-    # 构造查询
-    if not order_sn_match: 
-        print(" [QueryOrder] 获取用户最近订单")
-        stmt = (
-            select(Order)
-            .where(Order.user_id == user_id)
-            .order_by(Order.created_at.desc())
-            .limit(1)
-        )
-    else:
-        order_sn = order_sn_match.group()
-        print(f" [QueryOrder] 查询订单号: {order_sn}")
-        stmt = select(Order).where(
-            Order.order_sn == order_sn,
-            Order.user_id == user_id 
-        )
-
-    async with async_session_maker() as session:
-        result = await session.exec(stmt)
-        order = result.first()
-
-    if not order:
-        return {
-            "order_data": None, 
-            "context": ["用户询问了订单，但数据库中未查到相关记录。"]
-        }
-    
-    # 组装订单信息
-    items_str = ", ".join([f"{i['name']}(x{i['qty']})" for i in order.items])
-    order_context = (
-        f"订单号: {order.order_sn}\n"
-        f"状态: {order.status}\n"
-        f"商品:  {items_str}\n"
-        f"金额: {order.total_amount}元\n"
-        f"物流单号: {order.tracking_number or '暂无'}"
-    )
-    
-    return {
-        "order_data":  order.model_dump(), 
-        "context": [order_context]
-    }
+# query_order 节点已迁移至 app/graph/workflows/order.py 的 OrderWorkflow 子图。
+# 主图不再保留该节点；上层 (workflow.py) 通过 dispatch_router → order_workflow 调用。
 
 
 REFUND_AGENT_PROMPT = """你是电商售后助手。必须使用工具获取或改变退款数据，不能编造任何订单、申请或审核结果。
@@ -453,10 +369,12 @@ async def refund_agent(state: AgentState) -> dict:
       - 不再让 LLM 自由选择工具；每个阶段只做一件事。
       - DB 短路：order_id 已有 RefundApplication 时跳过 submit。
       - 用户确认：user_confirmed 缺失时拒绝调工具并返回友好提示。
+      - 子图模块级编译一次（app.graph.workflows.refund._REFUND_SUBGRAPH），
+        本节点不再每轮重建。
     """
-    from app.graph.workflows.refund import build_refund_subgraph
+    from app.graph.workflows.refund import get_refund_subgraph
 
-    subgraph = build_refund_subgraph()
+    subgraph = get_refund_subgraph()
     result = await subgraph.ainvoke(state)
     # 子图返回完整 state；只取 AgentState 顶层字段回写（避免回写中间计算字段）
     return {
@@ -474,9 +392,7 @@ async def refund_agent(state: AgentState) -> dict:
     }
 
 
-def should_call_refund_tool(state: AgentState) -> str:
-    """仅在最新模型消息携带工具调用时进入 ToolNode。"""
-    messages = state.get("messages", [])
-    if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-        return "refund_tools"
-    return "done"
+# should_call_refund_tool 已废弃。
+# P1 之后 refund_agent 不再产生 LangChain AIMessage.tool_calls，
+# FSM 节点经 GuardedToolExecutor 直接调 core_* handler，
+# 故主图不再需要 "refund_tools" ToolNode 与该路由函数。

@@ -237,7 +237,7 @@ app/
     tools.py                  core_* handler + LangChain @tool 薄壳（薄壳只路由到 Guard）
     workflows/
       refund.py               RefundWorkflow 子图（FSM + 工具登记 + 状态更新）
-      order.py                OrderWorkflow 子图（P3 占位）
+      order.py                OrderWorkflow 子图（P3 已落地：query_order → 自合成 answer，order_data 字段映射 order_id→id）
   services/
     refund_service.py         保留业务规则与数据库操作
     policy_*                  保持现有政策检索与 Guardrail
@@ -286,11 +286,23 @@ app/
 
 ### P3：领域工作流拆分
 
-- 将 OrderWorkflow 拆为子图；
+- 将 OrderWorkflow 拆为子图（`app/graph/workflows/order.py`）；
 - PolicyWorkflow 保持现有单节点，不做无意义拆分；
-- 完成 Thin Orchestrator 接入与回归测试。
+- 完成 Thin Orchestrator 接入与回归测试；
+- `_register_capabilities` 改为 per-name 幂等注册（refund 与 order 两模块互不阻断）；
+- 子图模块级编译一次复用（`_ORDER_SUBGRAPH` / `_REFUND_SUBGRAPH`）；
+- 顶层 `ToolNode(refund_tools+order_tools)` 死代码移除，工具薄壳保留供 LangChain 兼容与测试；
+- `query_order_tool` 归属从 `OrderQuery` 改为 `OrderWorkflow`；
+- 主图新增 `dispatch_router`：按 `active_domain` 派发到 `order_workflow` / `retrieve` / `refund_agent`，无活跃域才走 `intent_router`；
+- SSE 兜底事件捕获集合加入 `order_workflow`，确保 ORDER 确定性合成的 answer 经 SSE 输出。
 
-验收：ORDER/POLICY/REFUND 切换不丢失旧流程摘要；Policy Guardrail、退款审批与支付安全回归全部通过。
+验收（已实测落地）：
+
+- **ORDER/POLICY/REFUND 切换不丢旧流程摘要**：`ConversationStateManager.persist_turn` 与 `intent`/`active_domain` 同步，summary 在跨域切换时被保留。
+- **ORDER→REFUND 连续会话不丢 `active_order_id`**：OrderWorkflow 子图把 `core_query_order` 返回的 `outcome.data["order_id"]` 映射为 `order_data["id"]`，供 `persist_turn` 固化（`state_manager.py:288` 读 `order_data.get("id")`）。
+- **SSE 输出**：捕获集合 `{"generate", "refund_agent", "order_workflow"}`，无 LLM 流的 ORDER 路径通过 fallback answer 输出。
+- **per-name 幂等注册**：重复调用 `_register_capabilities` 不抛错。
+- **Policy Guardrail / 退款审批 / 支付安全回归**：`test_tool_registry.py` + `test_refund_workflow_fsm.py` + `test_refund_tools.py` + `test_conversation_history.py` + 新增 `test_order_workflow.py` 共 64 用例全过；改动文件 ruff 干净。
 
 ## 9. 暂缓事项
 

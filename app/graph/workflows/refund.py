@@ -290,10 +290,12 @@ async def refund_subgraph_entry(state: AgentState) -> dict[str, Any]:
 # 工具登记（启动时一次性注册；测试可在 import 后再补登记）
 # ===========================================
 
-def _register_capabilities() -> None:
-    if tool_registry.names():
-        return
-    tool_registry.register(
+_REFUND_CAPABILITIES: tuple[
+    tuple[str, "ToolCapability", object], ...
+] = (
+    # name, capability, handler — 按 per-name 幂等注册，避免跨模块注册互相阻断。
+    (
+        "check_refund_eligibility",
         ToolCapability(
             name="check_refund_eligibility",
             domain="REFUND",
@@ -304,8 +306,9 @@ def _register_capabilities() -> None:
             owner_workflow="RefundWorkflow",
         ),
         core_check_refund_eligibility,
-    )
-    tool_registry.register(
+    ),
+    (
+        "submit_refund_application",
         ToolCapability(
             name="submit_refund_application",
             domain="REFUND",
@@ -323,8 +326,9 @@ def _register_capabilities() -> None:
             owner_workflow="RefundWorkflow",
         ),
         core_submit_refund_application,
-    )
-    tool_registry.register(
+    ),
+    (
+        "query_refund_status",
         ToolCapability(
             name="query_refund_status",
             domain="REFUND",
@@ -346,23 +350,20 @@ def _register_capabilities() -> None:
             owner_workflow="RefundWorkflow",
         ),
         core_query_refund_status,
-    )
-    # 核心订单工具（domain=ORDER），在 P2 由独立 core handler 暴露给 Registry；
-    # 节点 `query_order` 继续在主图使用，但其底层语义与能力受 Registry 约束。
-    from app.graph.tools import core_query_order
+    ),
+)
 
-    tool_registry.register(
-        ToolCapability(
-            name="query_order_tool",
-            domain="ORDER",
-            allowed_stages=frozenset({"*"}),  # 订单查询在所有退款阶段均允许（只读）
-            required_slots=frozenset({"user_id"}),
-            writes_to_conversation=True,
-            audit_level="read",
-            owner_workflow="OrderQuery",
-        ),
-        core_query_order,
-    )
+
+def _register_capabilities() -> None:
+    """Per-name 幂等注册 REFUND 三项能力。
+
+    不再用 `if tool_registry.names(): return` 的全局 guard——那样会让 order.py
+    的注册被全局阻断。改为逐能力按名判断：同名跳过，不同名补登。
+    """
+    for name, capability, handler in _REFUND_CAPABILITIES:
+        if name in tool_registry.names():
+            continue
+        tool_registry.register(capability, handler)
 
 
 # ===========================================
@@ -519,6 +520,16 @@ def build_refund_subgraph():
     workflow.add_edge("submit", END)  # submit 完成即结束（含短路 / 工具调用两条路径）
 
     return workflow.compile()
+
+
+# 模块加载时编译一次并缓存；refund_agent 与外部测试直接复用。
+# 子图无 checkpointer、每次 invoke stateless，缓存安全。
+_REFUND_SUBGRAPH = build_refund_subgraph()
+
+
+def get_refund_subgraph():
+    """返回缓存的 refund 子图（每次 ainvoke 内部 stateless，可跨回合复用）。"""
+    return _REFUND_SUBGRAPH
 
 
 # ===========================================
