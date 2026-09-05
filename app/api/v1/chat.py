@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from app.api.v1.schemas import ChatRequest
+from app.api.v1.schemas import ChatHistoryMessage, ChatRequest, ChatSessionResponse
 from app.conversation.state_manager import (
     ConversationForbiddenError,
     ConversationMismatchError,
@@ -20,6 +20,21 @@ from app.services.policy_answer_guard import INTERNAL_LLM_TAG, POLICY_GUARD_TAG
 
 router = APIRouter()
 conversation_manager = ConversationStateManager()
+
+
+@router.get("/chat/session", response_model=ChatSessionResponse)
+async def get_chat_session(current_user_id: int = Depends(get_current_user_id)):
+    """Return the authenticated user's default conversation and recent transcript."""
+    conversation = await conversation_manager.resolve_session(
+        current_user_id, client_session_id=f"account:{current_user_id}"
+    )
+    messages = await conversation_manager.get_messages(
+        conversation.conversation_id, current_user_id, limit=100
+    )
+    return ChatSessionResponse(
+        conversation_id=conversation.conversation_id,
+        messages=[ChatHistoryMessage(role=item.role, content=item.content) for item in messages],
+    )
 
 @router.post("/chat")
 async def chat(
@@ -102,6 +117,7 @@ async def chat(
             yield f"data: {session_payload}\n\n"
             token_sent = False
             fallback_answer = ""
+            streamed_answer = ""
             async for event in app_graph.astream_events(
                 initial_state, config, version="v2"
             ):
@@ -123,6 +139,7 @@ async def chat(
                                 payload = json.dumps({"token": content}, ensure_ascii=False)
                                 yield f"data: {payload}\n\n"
                                 token_sent = True
+                                streamed_answer += content
 
                 # astream 正常会发送 on_chat_model_stream；保留节点结果兜底，
                 # 兼容不发送 token 事件的 OpenAI 兼容网关。
@@ -135,6 +152,8 @@ async def chat(
                 payload = json.dumps({"token": fallback_answer}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
 
+            final_answer = streamed_answer if token_sent else fallback_answer
+
             # P1: SSE 流结束时发出 stage 字段，让前端能感知当前 refund FSM 阶段。
             # 非 REFUND 领域时 stage 为 null，前端忽略即可。
             if hasattr(app_graph, "aget_state"):
@@ -146,6 +165,13 @@ async def chat(
                 }, ensure_ascii=False)
                 yield f"data: {stage_payload}\n\n"
                 compacted = await conversation_manager.persist_turn(conversation, values)
+                if final_answer:
+                    await conversation_manager.append_messages(
+                        conversation.conversation_id,
+                        current_user_id,
+                        request.question,
+                        final_answer,
+                    )
                 messages = list(values.get("messages") or [])
                 retained = conversation_manager.retained_messages(messages)
                 if compacted and len(retained) < len(messages):

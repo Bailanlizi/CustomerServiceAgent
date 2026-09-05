@@ -2,7 +2,17 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Column, DateTime, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlmodel import Field, SQLModel
 
 
@@ -48,4 +58,27 @@ class ConversationSession(SQLModel, table=True):
             server_default=text("CURRENT_TIMESTAMP"),
             onupdate=text("CURRENT_TIMESTAMP"),
         ),
+    )
+
+
+class ConversationMessage(SQLModel, table=True):
+    """Persistent user-visible transcript for restoring the customer chat UI."""
+
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        Index("ix_conversation_messages_conversation_created", "conversation_id", "created_at", "id"),
+        Index("ix_conversation_messages_user_created", "user_id", "created_at"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    conversation_id: UUID = Field(
+        sa_column=Column(ForeignKey("conversation_sessions.conversation_id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    user_id: int = Field(foreign_key="users.id", index=True)
+    role: str = Field(max_length=16)
+    content: str = Field(sa_column=Column(Text, nullable=False))
+    message_type: str = Field(default="text", max_length=32)
+    created_at: datetime = Field(
+        default_factory=utcnow_naive,
+        sa_column=Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     )

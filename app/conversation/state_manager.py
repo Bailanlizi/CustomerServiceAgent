@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from app.core.config import settings
 from app.core.database import async_session_maker
-from app.models.conversation import ConversationSession
+from app.models.conversation import ConversationMessage, ConversationSession
 from app.models.order import Order
 
 MEMORY_KEYS = (
@@ -126,15 +126,15 @@ class ConversationStateManager:
                     raise ConversationNotFoundError
                 if item.user_id != user_id:
                     raise ConversationForbiddenError
-                if item.client_session_id != client_session_id:
-                    raise ConversationMismatchError
                 return item
 
             result = await db.exec(
                 select(ConversationSession).where(
                     ConversationSession.user_id == user_id,
-                    ConversationSession.client_session_id == client_session_id,
-                )
+                ).order_by(
+                    ConversationSession.last_active_at.desc(),
+                    ConversationSession.updated_at.desc(),
+                ).limit(1)
             )
             existing = result.first()
             if existing:
@@ -244,6 +244,29 @@ class ConversationStateManager:
             **{key: memory.get(key) for key in MEMORY_KEYS},
             "intent": memory.get("active_domain"),
         }
+
+    async def get_messages(self, conversation_id: UUID, user_id: int, limit: int = 100) -> list[ConversationMessage]:
+        async with async_session_maker() as db:
+            result = await db.exec(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.conversation_id == conversation_id,
+                    ConversationMessage.user_id == user_id,
+                )
+                .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+                .limit(limit)
+            )
+            return list(reversed(result.all()))
+
+    async def append_messages(
+        self, conversation_id: UUID, user_id: int, user_content: str, assistant_content: str
+    ) -> None:
+        async with async_session_maker() as db:
+            db.add_all([
+                ConversationMessage(conversation_id=conversation_id, user_id=user_id, role="user", content=user_content),
+                ConversationMessage(conversation_id=conversation_id, user_id=user_id, role="assistant", content=assistant_content),
+            ])
+            await db.commit()
 
     async def _extract(self, question: str, memory: dict[str, Any]) -> SlotExtraction:
         prompt = (

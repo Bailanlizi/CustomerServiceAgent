@@ -38,6 +38,18 @@ class ChatClient:
         # 前端据此显示「确认提交」按钮。
         self.last_stage: str | None = None
         print(f"✅ 客户端已初始化:  用户={username}, ID={user_id}")
+
+    def load_session(self) -> list[dict[str, str]]:
+        response = requests.get(
+            f"{API_BASE_URL}/chat/session",
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        self.conversation_id = data["conversation_id"]
+        self.thread_id = f"conversation:{self.conversation_id}"
+        return data.get("messages", [])
     
     def send_message(self, message: str, user_confirmed: bool = False) -> tuple[bool, str, dict]:
         """发送消息到 Agent。
@@ -360,14 +372,17 @@ def create_chat_interface():
                     
                     gr.Markdown("---")
                     clear_btn = gr.Button(" 清空显示", variant="stop", size="sm")
-                    new_session_btn = gr.Button(" 新建会话", variant="secondary", size="sm")
 
         # === 逻辑函数 ===
         
         def handle_login(username, password, stored_session_id):
             session_id = stored_session_id or str(uuid.uuid4())
-            success, message, client, user_info = login_user(username, password, session_id)
+            success, message, client, _user_info = login_user(username, password, session_id)
             if success:
+                try:
+                    history = client.load_session()
+                except Exception as exc:
+                    return (None, gr.update(visible=True), gr.update(visible=False), "", username, password, gr.Warning(f"历史会话加载失败：{exc}"), session_id, [])
                 # 提取姓名用于 Header 显示
                 name = client.username
                 header_html = f'''
@@ -383,9 +398,10 @@ def create_chat_interface():
                     "", "", # 清空输入框
                     gr.Info("登录成功！"), # 使用 Gradio 内置通知
                     session_id,
+                    history,
                 )
             else:
-                return (None, gr.update(visible=True), gr.update(visible=False), "", username, password, gr.Warning(message), session_id)
+                return (None, gr.update(visible=True), gr.update(visible=False), "", username, password, gr.Warning(message), session_id, [])
 
         def handle_logout():
             return (
@@ -492,7 +508,7 @@ def create_chat_interface():
         login_btn.click(
             handle_login,
             inputs=[username_input, password_input, browser_session],
-            outputs=[client_state, login_panel, chat_panel, user_header_display, username_input, password_input, login_message, browser_session]
+            outputs=[client_state, login_panel, chat_panel, user_header_display, username_input, password_input, login_message, browser_session, chatbot]
         )
         
         logout_btn.click(
@@ -521,20 +537,6 @@ def create_chat_interface():
         
         clear_btn.click(list, outputs=[chatbot])
 
-        def start_new_session(client):
-            new_id = str(uuid.uuid4())
-            if client:
-                client.client_session_id = new_id
-                client.conversation_id = None
-                client.thread_id = None
-            return client, [], "", new_id
-
-        new_session_btn.click(
-            start_new_session,
-            inputs=[client_state],
-            outputs=[client_state, chatbot, status_display, browser_session],
-        )
-        
         # 快捷按钮逻辑
         btn_query_own.click(lambda: "查询我的订单", outputs=msg_input)
         btn_query_alice.click(lambda: "查询订单 SN20240001", outputs=msg_input)

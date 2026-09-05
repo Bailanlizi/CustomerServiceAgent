@@ -32,3 +32,13 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     # 非流式模式下的返回结构
     answer: str
+
+
+class ChatHistoryMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatSessionResponse(BaseModel):
+    conversation_id: UUID
+    messages: list[ChatHistoryMessage]
