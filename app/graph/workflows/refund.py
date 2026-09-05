@@ -34,6 +34,7 @@ from app.graph.tools import (
     submit_refund_application,
 )
 from app.services.refund_service import RefundEligibilityChecker
+from app.graph.tool_registry import ToolCapability, ToolCode, ToolOutcome, tool_registry
 
 
 class RefundStage(str, Enum):
@@ -44,6 +45,7 @@ class RefundStage(str, Enum):
     WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
     SUBMITTED = "SUBMITTED"
     DONE = "DONE"
+    REJECTED = "REJECTED"
 
 
 # ===========================================
@@ -91,6 +93,8 @@ def route_refund_stage(state: AgentState) -> str:
     last = _last_result(state)
     if not last.get("eligibility_checked"):
         return RefundStage.ELIGIBILITY_CHECKED.value
+    if last.get("eligibility_passed") is False:
+        return RefundStage.REJECTED.value
     if not slots.get("user_confirmed"):
         return RefundStage.WAITING_CONFIRMATION.value
     return RefundStage.SUBMITTED.value
@@ -159,12 +163,15 @@ async def node_check_eligibility(state: AgentState) -> dict[str, Any]:
         "order_sn": state.get("active_order_sn"),
         "user_id": state.get("user_id"),
     }
-    result = await check_refund_eligibility.ainvoke(state_kwargs)
+    _ensure_tool_capabilities()
+    outcome = await tool_registry.invoke("check_refund_eligibility", state, **state_kwargs)
+    result = outcome.message
     last = _last_result(state)
     last["eligibility_checked"] = True
     last["eligibility_message"] = result
     # 解析 ✅/❌ 标记以辅助后续路由
-    last["eligibility_passed"] = result.startswith("✅")
+    last["eligibility_passed"] = outcome.code == ToolCode.ELIGIBILITY_PASSED
+    last["tool_outcome"] = outcome.__dict__
     return _stage_payload(
         RefundStage.ELIGIBILITY_CHECKED,
         last_tool_result=last,
@@ -248,17 +255,26 @@ async def node_submit(state: AgentState) -> dict[str, Any]:
         "reason_category": state.get("refund_reason_category"),
         "user_confirmed": True,
     }
-    result = await submit_refund_application.ainvoke(state_kwargs)
+    _ensure_tool_capabilities()
+    outcome = await tool_registry.invoke("submit_refund_application", state, **state_kwargs)
+    result = outcome.message
     slots = dict(slots)
     last = _last_result(state)
     last["submit_message"] = result
     # 解析申请编号 "申请编号：#X"
-    m = re.search(r"#(\d+)", result)
-    if m:
-        slots["refund_submitted_id"] = int(m.group(1))
-        last["refund_id"] = int(m.group(1))
+    refund_id = outcome.data.get("refund_id")
+    if refund_id:
+        slots["refund_submitted_id"] = int(refund_id)
+        last["refund_id"] = int(refund_id)
+    last["tool_outcome"] = outcome.__dict__
+    if outcome.code in {ToolCode.REFUND_SUBMITTED, ToolCode.ALREADY_EXISTS}:
+        outcome_stage = RefundStage.DONE
+    elif outcome.retryable:
+        outcome_stage = RefundStage.SUBMITTED
+    else:
+        outcome_stage = RefundStage.REJECTED
     return {
-        **_stage_payload(RefundStage.DONE),
+        **_stage_payload(outcome_stage),
         "collected_slots": slots,
         "last_tool_result": last,
         "answer": result,
@@ -305,14 +321,50 @@ def build_refund_subgraph():
             RefundStage.WAITING_CONFIRMATION.value: "await_confirmation",
             RefundStage.SUBMITTED.value: "submit",
             RefundStage.DONE.value: END,
+            RefundStage.REJECTED.value: END,
         },
     )
 
-    # 各阶段执行完后跳回 entry 重新决策（除非阶段字段被显式重置）
-    workflow.add_edge("identify_order", "entry")
-    workflow.add_edge("collect_reason", "entry")
-    workflow.add_edge("check_eligibility", "entry")
-    workflow.add_edge("await_confirmation", "entry")
+    # 每轮最多执行一个阶段；下一轮由持久化工作记忆重新路由。
+    workflow.add_edge("identify_order", END)
+    workflow.add_edge("collect_reason", END)
+    workflow.add_edge("check_eligibility", END)
+    workflow.add_edge("await_confirmation", END)
     workflow.add_edge("submit", END)  # submit 完成即结束（含短路 / 工具调用两条路径）
 
     return workflow.compile()
+
+
+async def _eligibility_handler(*, state: dict[str, Any], idempotency_key: str | None, **_: Any) -> ToolOutcome:
+    text = await check_refund_eligibility.ainvoke({"order_sn": state.get("active_order_sn"), "user_id": state.get("user_id")})
+    if text.startswith("✅"):
+        return ToolOutcome(True, ToolCode.ELIGIBILITY_PASSED, text, {"order_sn": state.get("active_order_sn")})
+    return ToolOutcome(False, ToolCode.ELIGIBILITY_REJECTED, text, retryable=False)
+
+
+async def _submit_handler(*, state: dict[str, Any], idempotency_key: str | None, **_: Any) -> ToolOutcome:
+    text = await submit_refund_application.ainvoke({
+        "order_sn": state.get("active_order_sn"), "user_id": state.get("user_id"),
+        "thread_id": state.get("thread_id"), "reason_detail": state.get("collected_slots"),
+        "reason_category": state.get("refund_reason_category"), "user_confirmed": True,
+    })
+    match = re.search(r"#(\d+)", text)
+    if match:
+        return ToolOutcome(True, ToolCode.REFUND_SUBMITTED, text, {"refund_id": int(match.group(1))})
+    if "已有退款申请" in text or "已存在退款申请" in text:
+        match = re.search(r"#(\d+)", text)
+        return ToolOutcome(True, ToolCode.ALREADY_EXISTS, text, {"refund_id": int(match.group(1)) if match else None})
+    retryable = any(token in text for token in ("稍后重试", "提交失败", "提交冲突", "系统错误"))
+    return ToolOutcome(False, ToolCode.TEMPORARY_FAILURE if retryable else ToolCode.BUSINESS_REJECTED, text, retryable=retryable)
+
+
+def _ensure_tool_capabilities() -> None:
+    if tool_registry.names():
+        return
+    tool_registry.register(ToolCapability(
+        name="check_refund_eligibility", domain="REFUND", allowed_stages=frozenset({RefundStage.ELIGIBILITY_CHECKED.value}),
+        required_slots=frozenset({"active_order_sn", "user_id"}), writes_to_conversation=True, owner_workflow="RefundWorkflow"), _eligibility_handler)
+    tool_registry.register(ToolCapability(
+        name="submit_refund_application", domain="REFUND", allowed_stages=frozenset({RefundStage.SUBMITTED.value, RefundStage.WAITING_CONFIRMATION.value}),
+        required_slots=frozenset({"active_order_id", "active_order_sn", "refund_reason", "refund_reason_category"}), required_eligibility="passed",
+        requires_user_confirmation=True, idempotency_key_template="refund:{user_id}:{order_id}", writes_to_conversation=True, audit_level="sensitive", owner_workflow="RefundWorkflow"), _submit_handler)

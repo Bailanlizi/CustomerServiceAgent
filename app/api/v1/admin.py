@@ -11,6 +11,7 @@ from app.core.database import async_session_maker
 from app.models.audit import AuditLog, AuditAction
 from app.models.refund import RefundApplication, RefundStatus
 from app.models.message import MessageCard, MessageType, MessageStatus
+from app.models.conversation import ConversationSession
 from app.websocket.manager import manager
 from app.tasks.refund_tasks import process_refund_payment, send_refund_sms
 from sqlmodel import select, desc
@@ -29,6 +30,12 @@ class AuditTask(BaseModel):
     risk_level: str
     context_snapshot: Dict[str, Any]
     created_at: str
+    conversation_summary: Optional[str] = None
+    active_order_sn: Optional[str] = None
+    refund_reason: Optional[str] = None
+    refund_reason_category: Optional[str] = None
+    eligibility_result: Optional[Dict[str, Any]] = None
+    last_tool_outcome: Optional[Dict[str, Any]] = None
 
 
 class AdminDecisionRequest(BaseModel):
@@ -77,6 +84,16 @@ async def get_pending_tasks(
         # 转换为响应格式
         tasks = []
         for log in audit_logs: 
+            session_result = await session.exec(
+                select(ConversationSession).where(
+                    ConversationSession.checkpoint_thread_id == log.thread_id
+                )
+            )
+            conversation = session_result.first()
+            memory = conversation.working_memory_json if conversation else {}
+            slots = memory.get("collected_slots") if isinstance(memory, dict) else {}
+            slots = slots if isinstance(slots, dict) else {}
+            last_result = memory.get("last_tool_result") if isinstance(memory, dict) else None
             tasks.append(AuditTask(
                 audit_log_id=log.id,
                 thread_id=log.thread_id,
@@ -87,6 +104,13 @@ async def get_pending_tasks(
                 risk_level=log.risk_level,
                 context_snapshot=log.context_snapshot,
                 created_at=log.created_at.isoformat(),
+                conversation_summary=conversation.conversation_summary if conversation else None,
+                active_order_sn=memory.get("active_order_sn") if isinstance(memory, dict) else None,
+                refund_reason=slots.get("refund_reason"),
+                refund_reason_category=memory.get("refund_reason_category") if isinstance(memory, dict) else None,
+                eligibility_result={k: last_result.get(k) for k in ("eligibility_checked", "eligibility_passed", "eligibility_message")}
+                    if isinstance(last_result, dict) else None,
+                last_tool_outcome=last_result.get("tool_outcome") if isinstance(last_result, dict) else None,
             ))
         
         return tasks

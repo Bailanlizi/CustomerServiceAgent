@@ -176,6 +176,15 @@ class ConversationStateManager:
             order_sn = explicit_order.group(0).upper()
             if order_sn != memory.get("active_order_sn"):
                 memory["active_order_id"] = None
+                # A different order starts a new refund case; do not inherit
+                # terminal, confirmation, reason, or eligibility state.
+                slots = dict(memory.get("collected_slots") or {})
+                for key in ("refund_submitted_id", "user_confirmed", "refund_reason", "order_sn"):
+                    slots.pop(key, None)
+                memory["collected_slots"] = slots
+                memory["user_confirmed"] = None
+                memory["refund_reason_category"] = None
+                memory["last_tool_result"] = None
             memory["active_order_sn"] = order_sn
             slots = dict(memory.get("collected_slots") or {})
             slots["order_sn"] = order_sn

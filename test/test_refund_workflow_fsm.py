@@ -66,6 +66,16 @@ def test_route_returns_waiting_confirmation_when_eligibility_passed_but_not_conf
     assert route_refund_stage(state) == RefundStage.WAITING_CONFIRMATION.value
 
 
+def test_route_returns_rejected_when_eligibility_failed():
+    state = _make_state(
+        active_order_id=1,
+        active_order_sn="SN001",
+        collected_slots={"refund_reason": "食品变质"},
+        last_tool_result={"eligibility_checked": True, "eligibility_passed": False},
+    )
+    assert route_refund_stage(state) == RefundStage.REJECTED.value
+
+
 def test_route_returns_submitted_when_all_conditions_met():
     """订单、原因、资格、用户确认都齐备 → 阶段 5（SUBMITTED）。"""
     state = _make_state(
@@ -329,3 +339,29 @@ async def test_identify_order_node_passes_through_when_order_already_identified(
 
     # 透传：返回空 dict
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_resets_refund_context_when_order_changes():
+    memory = default_working_memory()
+    memory.update({
+        "active_domain": "REFUND",
+        "active_order_id": 1,
+        "active_order_sn": "SN001",
+        "user_confirmed": True,
+        "refund_reason_category": "SIZE_NOT_FIT",
+        "last_tool_result": {"eligibility_checked": True, "eligibility_passed": True},
+        "collected_slots": {
+            "order_sn": "SN001", "refund_reason": "尺码不合适",
+            "refund_submitted_id": 42, "user_confirmed": True,
+        },
+    })
+    manager = ConversationStateManager(extractor=_StubExtractor())
+    from types import SimpleNamespace
+    session = SimpleNamespace(working_memory_json=memory, conversation_summary=None, version=1)
+    result = await manager.prepare_turn(session, "我要退款，订单号 SN002")
+    assert result["active_order_id"] is None
+    assert result["user_confirmed"] is None
+    assert result["refund_reason_category"] is None
+    assert result["last_tool_result"] is None
+    assert "refund_submitted_id" not in result["collected_slots"]
