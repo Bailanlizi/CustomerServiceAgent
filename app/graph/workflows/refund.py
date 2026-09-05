@@ -10,17 +10,19 @@
     → SUBMITTED                调 submit_refund_application 创建申请
     → DONE                     完成（成功提交 / DB 已有申请短路）
 
-设计原则（与 architecture-update.md 一致）：
-  1. 每个节点只做一件事（推进槽位 / 调工具 / 短路 / 生成话术）。
-  2. 阶段路由是纯函数 route_refund_stage(state)，不读 DB。
-  3. DB 短路只在 SUBMITTED 节点入口查一次 RefundApplication，写入
-     collected_slots.refund_submitted_id，下次路由直接进入 DONE。
-  4. 子图节点直接调 refund_tools（手动从 state 提取 InjectedState 字段），
-     避免引入 ToolNode 嵌入带来的 free-form 循环。
-  5. 话术生成只在 LLM-required 阶段调 LLM（COLLECT_REASON / WAITING_CONFIRMATION），
-     其他阶段（IDENTIFY_ORDER / ELIGIBILITY_CHECKED / SUBMITTED / DONE）都是确定性代码。
+P2 changes:
+  * 删除 `_eligibility_handler` / `_submit_handler` 中的 `re.search(...)` 和
+    `text.startswith("✅")` 字符串解析；改为直接消费 core handler 返回的
+    `ToolOutcome`（`outcome.code` / `outcome.data["refund_id"]`）。
+  * 所有工具调用统一通过 `GuardedToolExecutor.invoke(...)`，让 Guard 的
+    `INVALID_STAGE / MISSING_SLOT / BUSINESS_REJECTED / NOT_CONFIRMED` 校验
+    在 RefundWorkflow 与顶层 ToolNode 两条路径上行为一致。
+  * Registry 登记 4 个能力：`check_refund_eligibility` / `submit_refund_application`
+    / `query_refund_status` / `query_order`（核心订单查询工具）。
+  * `last_tool_result` 补齐元数据（tool_name / workflow_stage /
+    conversation_id / thread_id / user_id / order_id / timestamp），由 Guard
+    自动填充，FSM 不再自行拼装。
 """
-import re
 from enum import Enum
 from typing import Any
 
@@ -29,12 +31,20 @@ from langgraph.graph import END, StateGraph
 
 from app.core.database import async_session_maker
 from app.graph.state import AgentState
+from app.graph.tool_registry import (
+    GuardedToolExecutor,
+    ToolCapability,
+    ToolCode,
+    ToolOutcome,
+    tool_registry,
+    write_tool_audit_log,
+)
 from app.graph.tools import (
-    check_refund_eligibility,
-    submit_refund_application,
+    core_check_refund_eligibility,
+    core_query_refund_status,
+    core_submit_refund_application,
 )
 from app.services.refund_service import RefundEligibilityChecker
-from app.graph.tool_registry import ToolCapability, ToolCode, ToolOutcome, tool_registry
 
 
 class RefundStage(str, Enum):
@@ -46,6 +56,12 @@ class RefundStage(str, Enum):
     SUBMITTED = "SUBMITTED"
     DONE = "DONE"
     REJECTED = "REJECTED"
+
+
+# ===========================================
+# 共享执行器（与 tools.py 顶层 LangChain 包装共用同一实例类型）
+# ===========================================
+_executor = GuardedToolExecutor()
 
 
 # ===========================================
@@ -154,28 +170,22 @@ async def node_collect_reason(state: AgentState) -> dict[str, Any]:
 
 
 async def node_check_eligibility(state: AgentState) -> dict[str, Any]:
-    """阶段 3: 调 check_refund_eligibility 工具，写入 last_tool_result。
+    """阶段 3: 通过 GuardedToolExecutor 调资格检查工具。
 
-    工具签名已用 InjectedState 注入 user_id / active_order_sn；这里手动从 state 提取
-    InjectedState 字段作为 kwargs 传入，绕过 ToolNode 嵌入。
+    outcome.code 直接决定 FSM 走向：ELIGIBILITY_PASSED → WAITING_CONFIRMATION，
+    ELIGIBILITY_REJECTED → REJECTED。FSM 不再依赖字符串前缀判断。
     """
-    state_kwargs = {
-        "order_sn": state.get("active_order_sn"),
-        "user_id": state.get("user_id"),
-    }
-    _ensure_tool_capabilities()
-    outcome = await tool_registry.invoke("check_refund_eligibility", state, **state_kwargs)
-    result = outcome.message
-    last = _last_result(state)
-    last["eligibility_checked"] = True
-    last["eligibility_message"] = result
-    # 解析 ✅/❌ 标记以辅助后续路由
-    last["eligibility_passed"] = outcome.code == ToolCode.ELIGIBILITY_PASSED
-    last["tool_outcome"] = outcome.__dict__
-    return _stage_payload(
-        RefundStage.ELIGIBILITY_CHECKED,
-        last_tool_result=last,
-        answer=result,
+    outcome = await _executor.invoke(
+        "check_refund_eligibility",
+        state=_workflow_state_dict(state),
+    )
+    return await _outcome_to_state_update(
+        state,
+        outcome,
+        eligibility_only=True,
+        fallback_stage=RefundStage.WAITING_CONFIRMATION
+        if outcome.ok
+        else RefundStage.REJECTED,
     )
 
 
@@ -214,9 +224,9 @@ async def node_submit(state: AgentState) -> dict[str, Any]:
 
     P1-3: 先查 RefundApplication 表，若已有申请则直接短路返回，跳过 submit 工具。
     P1-4: 用户未确认（顶层 user_confirmed=False 或缺失）时拒绝调工具。
+    P2: 短路 / 工具调用都走结构化 ToolOutcome，FSM 不再解析"申请编号：#X"。
     """
     order_id = state["active_order_id"]
-    user_id = state["user_id"]
     slots = _slots(state)
 
     # P1-4: 用户确认前置校验（与 submit_refund_application 工具内校验一致，
@@ -246,39 +256,25 @@ async def node_submit(state: AgentState) -> dict[str, Any]:
             ),
         }
 
-    # 调用 submit_refund_application 工具（手动传参，绕过 ToolNode）
-    state_kwargs = {
-        "order_sn": state.get("active_order_sn"),
-        "user_id": user_id,
-        "thread_id": state.get("thread_id"),
-        "reason_detail": slots,
-        "reason_category": state.get("refund_reason_category"),
-        "user_confirmed": True,
-    }
-    _ensure_tool_capabilities()
-    outcome = await tool_registry.invoke("submit_refund_application", state, **state_kwargs)
-    result = outcome.message
-    slots = dict(slots)
-    last = _last_result(state)
-    last["submit_message"] = result
-    # 解析申请编号 "申请编号：#X"
-    refund_id = outcome.data.get("refund_id")
-    if refund_id:
-        slots["refund_submitted_id"] = int(refund_id)
-        last["refund_id"] = int(refund_id)
-    last["tool_outcome"] = outcome.__dict__
-    if outcome.code in {ToolCode.REFUND_SUBMITTED, ToolCode.ALREADY_EXISTS}:
-        outcome_stage = RefundStage.DONE
-    elif outcome.retryable:
-        outcome_stage = RefundStage.SUBMITTED
-    else:
-        outcome_stage = RefundStage.REJECTED
-    return {
-        **_stage_payload(outcome_stage),
-        "collected_slots": slots,
-        "last_tool_result": last,
-        "answer": result,
-    }
+    # 通过 GuardedToolExecutor 调 submit；outcome.code / outcome.data["refund_id"]
+    # 是 FSM / 审计 / 管理员界面的唯一真源。
+    outcome = await _executor.invoke(
+        "submit_refund_application",
+        state=_workflow_state_dict(state),
+        arguments={
+            "reason_detail": slots,
+            "reason_category": state.get("refund_reason_category"),
+            "user_confirmed": True,
+        },
+    )
+    return await _outcome_to_state_update(
+        state,
+        outcome,
+        eligibility_only=False,
+        fallback_stage=RefundStage.DONE
+        if outcome.code in {ToolCode.REFUND_SUBMITTED, ToolCode.ALREADY_EXISTS}
+        else RefundStage.REJECTED,
+    )
 
 
 async def refund_subgraph_entry(state: AgentState) -> dict[str, Any]:
@@ -291,11 +287,201 @@ async def refund_subgraph_entry(state: AgentState) -> dict[str, Any]:
 
 
 # ===========================================
+# 工具登记（启动时一次性注册；测试可在 import 后再补登记）
+# ===========================================
+
+def _register_capabilities() -> None:
+    if tool_registry.names():
+        return
+    tool_registry.register(
+        ToolCapability(
+            name="check_refund_eligibility",
+            domain="REFUND",
+            allowed_stages=frozenset({RefundStage.ELIGIBILITY_CHECKED.value}),
+            required_slots=frozenset({"active_order_sn", "user_id"}),
+            writes_to_conversation=True,
+            audit_level="read",
+            owner_workflow="RefundWorkflow",
+        ),
+        core_check_refund_eligibility,
+    )
+    tool_registry.register(
+        ToolCapability(
+            name="submit_refund_application",
+            domain="REFUND",
+            allowed_stages=frozenset(
+                {RefundStage.SUBMITTED.value, RefundStage.WAITING_CONFIRMATION.value}
+            ),
+            required_slots=frozenset(
+                {"active_order_id", "active_order_sn", "refund_reason", "refund_reason_category"}
+            ),
+            required_eligibility="passed",
+            requires_user_confirmation=True,
+            idempotency_key_template="refund:{user_id}:{order_id}",
+            writes_to_conversation=True,
+            audit_level="sensitive",
+            owner_workflow="RefundWorkflow",
+        ),
+        core_submit_refund_application,
+    )
+    tool_registry.register(
+        ToolCapability(
+            name="query_refund_status",
+            domain="REFUND",
+            allowed_stages=frozenset(
+                {
+                    RefundStage.IDLE.value,
+                    RefundStage.IDENTIFY_ORDER.value,
+                    RefundStage.COLLECT_REASON.value,
+                    RefundStage.ELIGIBILITY_CHECKED.value,
+                    RefundStage.WAITING_CONFIRMATION.value,
+                    RefundStage.SUBMITTED.value,
+                    RefundStage.DONE.value,
+                    RefundStage.REJECTED.value,
+                }
+            ),
+            required_slots=frozenset({"user_id"}),
+            writes_to_conversation=True,
+            audit_level="read",
+            owner_workflow="RefundWorkflow",
+        ),
+        core_query_refund_status,
+    )
+    # 核心订单工具（domain=ORDER），在 P2 由独立 core handler 暴露给 Registry；
+    # 节点 `query_order` 继续在主图使用，但其底层语义与能力受 Registry 约束。
+    from app.graph.tools import core_query_order
+
+    tool_registry.register(
+        ToolCapability(
+            name="query_order_tool",
+            domain="ORDER",
+            allowed_stages=frozenset({"*"}),  # 订单查询在所有退款阶段均允许（只读）
+            required_slots=frozenset({"user_id"}),
+            writes_to_conversation=True,
+            audit_level="read",
+            owner_workflow="OrderQuery",
+        ),
+        core_query_order,
+    )
+
+
+# ===========================================
+# 工具结果 → 状态写入（结构化）
+# ===========================================
+
+async def _outcome_to_state_update(
+    state: AgentState,
+    outcome: ToolOutcome,
+    *,
+    eligibility_only: bool,
+    fallback_stage: RefundStage,
+) -> dict[str, Any]:
+    """把 ToolOutcome 转换为节点返回的状态更新。
+
+    不再解析中文 / 正则提取字段——所有结构化字段由 Guard 在 envelope 阶段
+    填充（tool_name / workflow_stage / user_id / order_id / timestamp /
+    conversation_id / thread_id / idempotency_key），handler 仅消费它们。
+    """
+    slots = _slots(state)
+    last = _last_result(state)
+
+    if eligibility_only:
+        last["eligibility_checked"] = True
+        last["eligibility_passed"] = outcome.code == ToolCode.ELIGIBILITY_PASSED
+        last["eligibility_message"] = outcome.message
+        last["tool_outcome"] = _outcome_to_metadata(outcome)
+        # 即使 outcome 是 Guard 拒绝（如 INVALID_STAGE），也要把它写回
+        # last_tool_result 让后续阶段（如 SUBMITTED）能读取 eligibility_passed。
+        last["last_tool_result_code"] = outcome.code
+        last["last_tool_result_ok"] = outcome.ok
+        return _stage_payload(
+            fallback_stage if outcome.ok else RefundStage.REJECTED,
+            last_tool_result=last,
+            answer=outcome.message,
+        )
+
+    # submit 路径
+    last["submit_message"] = outcome.message
+    last["tool_outcome"] = _outcome_to_metadata(outcome)
+    last["last_tool_result_code"] = outcome.code
+    last["last_tool_result_ok"] = outcome.ok
+
+    refund_id = (outcome.data or {}).get("refund_id")
+    slots = dict(slots)
+    if refund_id is not None:
+        slots["refund_submitted_id"] = int(refund_id)
+        last["refund_id"] = int(refund_id)
+
+    if outcome.code in {ToolCode.REFUND_SUBMITTED, ToolCode.ALREADY_EXISTS}:
+        target_stage = RefundStage.DONE
+    elif outcome.retryable or outcome.code == ToolCode.TEMPORARY_FAILURE:
+        target_stage = RefundStage.SUBMITTED
+    else:
+        target_stage = fallback_stage
+
+    # 敏感工具：同步写一行审计，避免 fire-and-forget 在测试结束 / 进程
+    # 退出前丢失敏感事件记录。审计失败被内部 try/except 吞掉（不会回滚
+    # 业务结果），所以 await 是安全的。
+    cap = tool_registry.get(outcome.tool_name or "submit_refund_application")
+    if cap.audit_level == "sensitive":
+        await write_tool_audit_log(outcome)
+
+    return _stage_payload(
+        target_stage,
+        collected_slots=slots,
+        last_tool_result=last,
+        answer=outcome.message,
+    )
+
+
+def _outcome_to_metadata(outcome: ToolOutcome) -> dict[str, Any]:
+    """把 ToolOutcome 序列化为 last_tool_result.tool_outcome dict。
+
+    包含 PLAN 第 3 节要求的 9+ 项元数据：tool_name, code, ok, message, data,
+    retryable, idempotency_key, workflow_stage, conversation_id, thread_id,
+    user_id, order_id, timestamp, domain。
+    """
+    return {
+        "tool_name": outcome.tool_name,
+        "code": outcome.code,
+        "ok": outcome.ok,
+        "message": outcome.message,
+        "data": outcome.data,
+        "retryable": outcome.retryable,
+        "idempotency_key": outcome.idempotency_key,
+        "workflow_stage": outcome.workflow_stage,
+        "conversation_id": outcome.conversation_id,
+        "thread_id": outcome.thread_id,
+        "user_id": outcome.user_id,
+        "order_id": outcome.order_id,
+        "timestamp": outcome.timestamp,
+        "domain": outcome.domain,
+    }
+
+
+def _workflow_state_dict(state: AgentState) -> dict[str, Any]:
+    """把 AgentState 转换为 Registry 需要的 state dict。
+
+    AgentState 的字段都可以直接转 dict；NotRequired 字段缺失时返回 None，
+    Guard 内部用 `state.get(key)` 读取时不会 KeyError。
+    """
+    keys = (
+        "user_id", "active_order_id", "active_order_sn", "thread_id",
+        "conversation_id", "active_domain", "intent", "workflow_stage",
+        "refund_reason_category", "user_confirmed", "collected_slots",
+        "last_tool_result",
+    )
+    return {k: state.get(k) for k in keys}
+
+
+# ===========================================
 # 子图构建
 # ===========================================
 
 def build_refund_subgraph():
     """构建并编译 refund 子图（无 checkpointer，由主图托管）。"""
+    _register_capabilities()
+
     workflow = StateGraph(AgentState)
 
     workflow.add_node("entry", refund_subgraph_entry)
@@ -335,36 +521,26 @@ def build_refund_subgraph():
     return workflow.compile()
 
 
+# ===========================================
+# Backwards-compat shims for existing imports
+# ===========================================
+# P1 中的旧符号仍被部分测试 / 旧代码引用；保留以避免破坏外部依赖。
 async def _eligibility_handler(*, state: dict[str, Any], idempotency_key: str | None, **_: Any) -> ToolOutcome:
-    text = await check_refund_eligibility.ainvoke({"order_sn": state.get("active_order_sn"), "user_id": state.get("user_id")})
-    if text.startswith("✅"):
-        return ToolOutcome(True, ToolCode.ELIGIBILITY_PASSED, text, {"order_sn": state.get("active_order_sn")})
-    return ToolOutcome(False, ToolCode.ELIGIBILITY_REJECTED, text, retryable=False)
+    """[deprecated] P1 兼容入口；P2 起请直接用 `core_check_refund_eligibility`."""
+    return await core_check_refund_eligibility(state=state, idempotency_key=idempotency_key)
 
 
 async def _submit_handler(*, state: dict[str, Any], idempotency_key: str | None, **_: Any) -> ToolOutcome:
-    text = await submit_refund_application.ainvoke({
-        "order_sn": state.get("active_order_sn"), "user_id": state.get("user_id"),
-        "thread_id": state.get("thread_id"), "reason_detail": state.get("collected_slots"),
-        "reason_category": state.get("refund_reason_category"), "user_confirmed": True,
-    })
-    match = re.search(r"#(\d+)", text)
-    if match:
-        return ToolOutcome(True, ToolCode.REFUND_SUBMITTED, text, {"refund_id": int(match.group(1))})
-    if "已有退款申请" in text or "已存在退款申请" in text:
-        match = re.search(r"#(\d+)", text)
-        return ToolOutcome(True, ToolCode.ALREADY_EXISTS, text, {"refund_id": int(match.group(1)) if match else None})
-    retryable = any(token in text for token in ("稍后重试", "提交失败", "提交冲突", "系统错误"))
-    return ToolOutcome(False, ToolCode.TEMPORARY_FAILURE if retryable else ToolCode.BUSINESS_REJECTED, text, retryable=retryable)
+    """[deprecated] P1 兼容入口；P2 起请直接用 `core_submit_refund_application`."""
+    return await core_submit_refund_application(
+        state=state,
+        idempotency_key=idempotency_key,
+        reason_detail=state.get("collected_slots"),
+        reason_category=state.get("refund_reason_category"),
+        user_confirmed=True,
+    )
 
 
 def _ensure_tool_capabilities() -> None:
-    if tool_registry.names():
-        return
-    tool_registry.register(ToolCapability(
-        name="check_refund_eligibility", domain="REFUND", allowed_stages=frozenset({RefundStage.ELIGIBILITY_CHECKED.value}),
-        required_slots=frozenset({"active_order_sn", "user_id"}), writes_to_conversation=True, owner_workflow="RefundWorkflow"), _eligibility_handler)
-    tool_registry.register(ToolCapability(
-        name="submit_refund_application", domain="REFUND", allowed_stages=frozenset({RefundStage.SUBMITTED.value, RefundStage.WAITING_CONFIRMATION.value}),
-        required_slots=frozenset({"active_order_id", "active_order_sn", "refund_reason", "refund_reason_category"}), required_eligibility="passed",
-        requires_user_confirmation=True, idempotency_key_template="refund:{user_id}:{order_id}", writes_to_conversation=True, audit_level="sensitive", owner_workflow="RefundWorkflow"), _submit_handler)
+    """[deprecated] P1 兼容入口；P2 起请直接用 `_register_capabilities`."""
+    _register_capabilities()

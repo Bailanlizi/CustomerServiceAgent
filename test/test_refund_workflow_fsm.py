@@ -16,10 +16,26 @@ from app.conversation.state_manager import (
     ConversationStateManager,
     default_working_memory,
 )
+from app.graph.tool_registry import tool_registry
 from app.graph.workflows.refund import (
     RefundStage,
     route_refund_stage,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_idempotency_cache_between_tests():
+    """避免 P1-3 引入的进程内幂等缓存跨测试命中。"""
+    saved_handlers = dict(tool_registry._handlers)
+    saved_capabilities = {cap.name: cap for cap in tool_registry.capabilities()}
+    tool_registry._idempotency_cache.clear()
+    yield
+    tool_registry._capabilities.clear()
+    for name, cap in saved_capabilities.items():
+        tool_registry._capabilities[name] = cap
+    tool_registry._handlers.clear()
+    tool_registry._handlers.update(saved_handlers)
+    tool_registry._idempotency_cache.clear()
 
 
 def _make_state(**overrides: Any) -> dict[str, Any]:
@@ -149,7 +165,12 @@ class _StubExtractor:
 
 @pytest.mark.asyncio
 async def test_submit_refund_application_rejects_when_user_not_confirmed():
-    """submit_refund_application 工具必须在校验 user_confirmed 缺失时直接拒绝。"""
+    """submit_refund_application 工具必须在校验 user_confirmed 缺失时直接拒绝。
+
+    P2 起，工具内部走 GuardedToolExecutor → ToolCapabilityRegistry.invoke，
+    因此 state 必须显式声明 `workflow_stage=WAITING_CONFIRMATION`（与 P1 流程
+    一致）让 stage 检查通过；user_confirmed=False 才会触发 NOT_CONFIRMED 拒绝。
+    """
     from typing import Annotated, TypedDict
 
     from langchain_core.messages import AIMessage
@@ -162,11 +183,15 @@ async def test_submit_refund_application_rejects_when_user_not_confirmed():
     class S(TypedDict):
         messages: Annotated[list, add_messages]
         user_id: int
+        active_order_id: int | None  # P2: Guard required_slot
         active_order_sn: str | None
         collected_slots: dict
         refund_reason_category: str | None
         thread_id: str
         user_confirmed: bool | None
+        workflow_stage: str | None
+        active_domain: str | None
+        last_tool_result: dict | None  # P2: Guard required_eligibility 检查
 
     workflow = StateGraph(S)
     workflow.add_node("tools", ToolNode([submit_refund_application]))
@@ -183,15 +208,19 @@ async def test_submit_refund_application_rejects_when_user_not_confirmed():
             }])],
             "user_id": 1,
             "thread_id": "t",
+            "active_order_id": 1,  # P2: Guard required_slot
             "active_order_sn": "SN20240003",
             "collected_slots": {"refund_reason": "尺码不合适"},
             "refund_reason_category": "SIZE_NOT_FIT",
             "user_confirmed": False,  # 关键：未确认
+            "workflow_stage": "WAITING_CONFIRMATION",  # P2: 让 Guard stage check 通过
+            "active_domain": "REFUND",  # P2: 让 Guard domain check 通过
+            "last_tool_result": {"eligibility_passed": True, "eligibility_checked": True},  # P2: 通过资格校验
         },
         config={"configurable": {"thread_id": "test"}},
     )
     content = result["messages"][-1].content
-    assert "❌" in content
+    assert "❌" in content or "尚未" in content
     assert "尚未确认" in content or "确认" in content
 
 
@@ -219,34 +248,29 @@ async def test_node_submit_short_circuits_when_existing_refund(monkeypatch):
         "_check_existing_refund",
         fake_check_existing,
     )
-    # 拦截 submit_refund_application 工具，若被调用则测试失败。
-    # StructuredTool 不支持字段赋值，但可以用 pytest 的 monkeypatch.setattr
-    # 替换模块级 ainvoke 引用。
+    # P2: 拦截 core_submit_refund_application（node_submit 经 GuardedToolExecutor
+    # 调用 core handler）。若被调用则测试失败。
     submit_calls: list[dict] = []
 
-    async def fake_ainvoke(*args, **kwargs):
-        submit_calls.append({"args": args, "kwargs": kwargs})
-        return "❌ 不应被调用"
+    async def fake_core(*, state, idempotency_key=None, **kwargs):
+        submit_calls.append({"state": state, "kwargs": kwargs})
+        from app.graph.tool_registry import ToolCode, ToolOutcome
+        return ToolOutcome(False, ToolCode.SYSTEM_ERROR, "❌ 不应被调用")
 
-    # 直接替换模块级符号引用（node_submit 通过模块级名字调用）
-    original = refund_module.submit_refund_application
-    refund_module.submit_refund_application = fake_ainvoke
-    try:
-        state = _make_state(
-            active_order_id=1,
-            active_order_sn="SN001",
-            user_id=1,
-            collected_slots={"refund_reason": "尺码不合适"},
-            last_tool_result={"eligibility_checked": True, "eligibility_passed": True},
-            # P1: 顶层 user_confirmed 是工具签名入口；prepare_turn 已从
-            # collected_slots.user_confirmed 提升到顶层。
-            user_confirmed=True,
-        )
-        result = await refund_module.node_submit(state)
-    finally:
-        refund_module.submit_refund_application = original
+    monkeypatch.setattr(refund_module, "core_submit_refund_application", fake_core)
+    state = _make_state(
+        active_order_id=1,
+        active_order_sn="SN001",
+        user_id=1,
+        collected_slots={"refund_reason": "尺码不合适"},
+        last_tool_result={"eligibility_checked": True, "eligibility_passed": True},
+        # P1: 顶层 user_confirmed 是工具签名入口；prepare_turn 已从
+        # collected_slots.user_confirmed 提升到顶层。
+        user_confirmed=True,
+    )
+    result = await refund_module.node_submit(state)
 
-    # 工具未被调用
+    # core handler 一次都没被调用（短路分支不调 _executor）
     assert submit_calls == []
     # 已写入短路标志
     assert result["collected_slots"]["refund_submitted_id"] == 99
@@ -262,24 +286,21 @@ async def test_node_submit_refuses_when_user_not_confirmed(monkeypatch):
 
     submit_calls: list[dict] = []
 
-    async def fake_ainvoke(*args, **kwargs):
-        submit_calls.append({"args": args, "kwargs": kwargs})
-        return "❌ 不应被调用"
+    async def fake_core(*, state, idempotency_key=None, **kwargs):
+        from app.graph.tool_registry import ToolCode, ToolOutcome
+        submit_calls.append({"state": state, "kwargs": kwargs})
+        return ToolOutcome(False, ToolCode.SYSTEM_ERROR, "❌ 不应被调用")
 
-    original = refund_module.submit_refund_application
-    refund_module.submit_refund_application = fake_ainvoke
-    try:
-        state = _make_state(
-            active_order_id=1,
-            active_order_sn="SN001",
-            user_id=1,
-            collected_slots={"refund_reason": "尺码不合适"},
-            last_tool_result={"eligibility_checked": True, "eligibility_passed": True},
-            # user_confirmed 缺失
-        )
-        result = await refund_module.node_submit(state)
-    finally:
-        refund_module.submit_refund_application = original
+    monkeypatch.setattr(refund_module, "core_submit_refund_application", fake_core)
+    state = _make_state(
+        active_order_id=1,
+        active_order_sn="SN001",
+        user_id=1,
+        collected_slots={"refund_reason": "尺码不合适"},
+        last_tool_result={"eligibility_checked": True, "eligibility_passed": True},
+        # user_confirmed 缺失
+    )
+    result = await refund_module.node_submit(state)
 
     assert submit_calls == []
     assert "尚未在前端确认" in result["answer"]

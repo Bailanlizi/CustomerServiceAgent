@@ -12,7 +12,23 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.graph import nodes
+from app.graph.tool_registry import tool_registry
 from app.services.policy_answer_guard import PolicyAnswer
+
+
+@pytest.fixture(autouse=True)
+def _clear_idempotency_cache_between_tests():
+    """避免 P1-3 引入的进程内幂等缓存跨测试命中。"""
+    saved_handlers = dict(tool_registry._handlers)
+    saved_capabilities = {cap.name: cap for cap in tool_registry.capabilities()}
+    tool_registry._idempotency_cache.clear()
+    yield
+    tool_registry._capabilities.clear()
+    for name, cap in saved_capabilities.items():
+        tool_registry._capabilities[name] = cap
+    tool_registry._handlers.clear()
+    tool_registry._handlers.update(saved_handlers)
+    tool_registry._idempotency_cache.clear()
 
 EVIDENCE = [
     {

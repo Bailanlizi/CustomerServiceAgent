@@ -14,11 +14,33 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import InjectedState, ToolNode
 
+from app.graph.tool_registry import tool_registry
 from app.graph.tools import (
     check_refund_eligibility,
     refund_tools,
     submit_refund_application,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_idempotency_cache_between_tests():
+    """避免 P1-3 引入的进程内幂等缓存跨测试命中（refund:{user_id}:{order_id}
+    在多个测试中复用 user_id=1 时会撞缓存）。
+
+    关键：必须同时清 `_capabilities` 与 `_handlers`，否则
+    `_register_capabilities` 检查 `names()` 非空会提前 return，
+    后续测试拿不到 handler。
+    """
+    saved_handlers = dict(tool_registry._handlers)
+    saved_capabilities = {cap.name: cap for cap in tool_registry.capabilities()}
+    tool_registry._idempotency_cache.clear()
+    yield
+    tool_registry._capabilities.clear()
+    for name, cap in saved_capabilities.items():
+        tool_registry._capabilities[name] = cap
+    tool_registry._handlers.clear()
+    tool_registry._handlers.update(saved_handlers)
+    tool_registry._idempotency_cache.clear()
 
 
 async def invoke_refund_tool(name: str, args: dict, user_id: int) -> str:
@@ -87,6 +109,7 @@ def _build_tool_graph(tool_fn):
     class S(TypedDict):
         messages: Annotated[list, add_messages]
         user_id: int
+        active_order_id: int | None  # P2: Guard required_slot
         active_order_sn: str | None
         collected_slots: dict
         refund_reason_category: str | None
@@ -94,6 +117,10 @@ def _build_tool_graph(tool_fn):
         # P1: submit_refund_application 通过 InjectedState("user_confirmed") 读取
         # 用户确认标志；测试必须显式声明该字段以满足 LangGraph runtime 要求。
         user_confirmed: bool | None
+        # P2: Guard stage / domain 检查需要的字段。
+        workflow_stage: str | None
+        active_domain: str | None
+        last_tool_result: dict | None
 
     workflow = StateGraph(S)
     workflow.add_node("tools", ToolNode([tool_fn]))
@@ -117,6 +144,9 @@ async def test_submit_refund_rejects_when_order_sn_missing_from_state():
             }])],
             "user_id": 1,
             "thread_id": "t",
+            # P2: 让 Guard domain / stage 检查通过（指向退款域的 ELIGIBILITY_CHECKED）。
+            "active_domain": "REFUND",
+            "workflow_stage": "ELIGIBILITY_CHECKED",
             # LangGraph 的 InjectedState 在 state 缺 key 时直接抛 KeyError；这里
             # 用 None 显式表达"工作记忆里有这个字段但没有值"。
             "active_order_sn": None,
@@ -124,7 +154,7 @@ async def test_submit_refund_rejects_when_order_sn_missing_from_state():
         config={"configurable": {"thread_id": "test-thread"}},
     )
     content = result["messages"][-1].content
-    assert "缺少订单号" in content
+    assert "缺少订单号" in content or "缺少必要信息" in content
 
 
 @pytest.mark.asyncio
@@ -135,6 +165,10 @@ async def test_submit_refund_rejects_when_refund_reason_missing_from_state():
     # 但 InjectedState 字段以 working memory 为准，因此必须报错。
     # P1: user_confirmed=True 让前置校验顺序推进到 refund_reason 检查，
     # 不会因为 user_confirmed 缺失而误返回。
+    # P2: workflow_stage=WAITING_CONFIRMATION + active_domain=REFUND 让 Guard
+    # 通过 stage / domain 检查；last_tool_result.eligibility_passed=True 让
+    # required_eligibility 通过；user_confirmed=True 让 confirmation 通过；
+    # 此时 refund_reason 缺失必然触发 MISSING_SLOT。
     result = await graph.ainvoke(
         {
             "messages": [AIMessage(content="", tool_calls=[{
@@ -144,15 +178,19 @@ async def test_submit_refund_rejects_when_refund_reason_missing_from_state():
                 "type": "tool_call",
             }])],
             "user_id": 1,
+            "active_order_id": 1,
             "active_order_sn": "SN20240003",
             "collected_slots": {},
             "refund_reason_category": "QUALITY_ISSUE",
             "user_confirmed": True,
+            "workflow_stage": "WAITING_CONFIRMATION",
+            "active_domain": "REFUND",
+            "last_tool_result": {"eligibility_passed": True, "eligibility_checked": True},
         },
         config={"configurable": {"thread_id": "test-thread-1"}},
     )
     content = result["messages"][-1].content
-    assert "缺少退货原因" in content
+    assert "缺少退货原因" in content or "缺少必要信息" in content
 
 
 @pytest.mark.asyncio
@@ -162,6 +200,7 @@ async def test_check_refund_eligibility_uses_state_injected_order_sn():
     graph = _build_tool_graph(check_refund_eligibility)
     # LLM 伪造 args.order_sn 为 SN20240004（用户2的订单），但 state.active_order_sn
     # 是用户1的 SN20240003；工具应当以 state 为准查询用户1的订单，符合预期。
+    # P2: workflow_stage=ELIGIBILITY_CHECKED + active_domain=REFUND 让 Guard 通过。
     result = await graph.ainvoke(
         {
             "messages": [AIMessage(content="", tool_calls=[{
@@ -172,6 +211,8 @@ async def test_check_refund_eligibility_uses_state_injected_order_sn():
             }])],
             "user_id": 1,
             "active_order_sn": "SN20240003",  # 工作记忆：用户1的订单
+            "workflow_stage": "ELIGIBILITY_CHECKED",
+            "active_domain": "REFUND",
         },
         config={"configurable": {"thread_id": "test-thread-2"}},
     )
@@ -200,10 +241,14 @@ async def test_submit_refund_uses_injected_reason_text_in_audit():
             }])],
             "user_id": 1,
             "thread_id": "t-audit",
+            "active_order_id": 2,
             "active_order_sn": "SN20240002",
             "collected_slots": {"refund_reason": "尺码不合适"},
             "refund_reason_category": "SIZE_NOT_FIT",
             "user_confirmed": True,
+            "workflow_stage": "WAITING_CONFIRMATION",
+            "active_domain": "REFUND",
+            "last_tool_result": {"eligibility_passed": True, "eligibility_checked": True},
         },
         config={"configurable": {"thread_id": "test-thread-3"}},
     )
@@ -231,16 +276,19 @@ async def test_submit_refund_rejects_when_user_not_confirmed():
             }])],
             "user_id": 1,
             "thread_id": "t-no-confirm",
+            "active_order_id": 3,
             "active_order_sn": "SN20240003",
             "collected_slots": {"refund_reason": "尺码不合适"},
             "refund_reason_category": "SIZE_NOT_FIT",
             "user_confirmed": False,
+            "workflow_stage": "WAITING_CONFIRMATION",
+            "active_domain": "REFUND",
+            "last_tool_result": {"eligibility_passed": True, "eligibility_checked": True},
         },
         config={"configurable": {"thread_id": "test-no-confirm"}},
     )
     content = result["messages"][-1].content
-    assert "❌" in content
-    assert "确认" in content or "未确认" in content
+    assert "尚未" in content or "确认" in content
     # 必须不进入提交分支（避免污染数据库）
     assert "退货申请已提交" not in content
 

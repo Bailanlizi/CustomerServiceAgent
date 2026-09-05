@@ -2,19 +2,21 @@
 """
 管理员 API
 """
+from datetime import datetime, timezone
+from typing import Any, Literal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, model_validator
-from typing import List, Optional, Dict, Any, Literal
-from datetime import datetime, timezone
-from app.core.security import get_admin_user_id
+from sqlmodel import desc, select
+
 from app.core.database import async_session_maker
-from app.models.audit import AuditLog, AuditAction
-from app.models.refund import RefundApplication, RefundStatus
-from app.models.message import MessageCard, MessageType, MessageStatus
+from app.core.security import get_admin_user_id
+from app.models.audit import AuditAction, AuditLog
 from app.models.conversation import ConversationSession
-from app.websocket.manager import manager
+from app.models.message import MessageCard, MessageStatus, MessageType
+from app.models.refund import RefundApplication, RefundStatus
 from app.tasks.refund_tasks import process_refund_payment, send_refund_sms
-from sqlmodel import select, desc
+from app.websocket.manager import manager
 
 router = APIRouter()
 
@@ -24,24 +26,32 @@ class AuditTask(BaseModel):
     audit_log_id: int
     thread_id: str
     user_id: int
-    refund_application_id: Optional[int]
-    order_id: Optional[int]
+    refund_application_id: int | None
+    order_id: int | None
     trigger_reason: str
     risk_level: str
-    context_snapshot: Dict[str, Any]
+    context_snapshot: dict[str, Any]
     created_at: str
-    conversation_summary: Optional[str] = None
-    active_order_sn: Optional[str] = None
-    refund_reason: Optional[str] = None
-    refund_reason_category: Optional[str] = None
-    eligibility_result: Optional[Dict[str, Any]] = None
-    last_tool_outcome: Optional[Dict[str, Any]] = None
+    conversation_summary: str | None = None
+    active_order_sn: str | None = None
+    refund_reason: str | None = None
+    refund_reason_category: str | None = None
+    # P2: 结构化元数据（PLAN 第 3 / 5 节）
+    eligibility_result: dict[str, Any] | None = None
+    last_tool_outcome: dict[str, Any] | None = None
+    refund_amount: str | None = None
+    refund_risk_level: str | None = None
+    refund_status: str | None = None
+    refund_application_id_extra: int | None = None
+    # 会话活跃工作记忆摘要（audit 字段以外的结构化摘要）
+    workflow_stage: str | None = None
+    user_confirmed: bool | None = None
 
 
 class AdminDecisionRequest(BaseModel):
     """管理员决策请求"""
     action: Literal["APPROVE", "REJECT"]
-    admin_comment: Optional[str] = None
+    admin_comment: str | None = None
 
     @model_validator(mode="after")
     def reject_requires_comment(self):
@@ -58,9 +68,9 @@ class AdminDecisionResponse(BaseModel):
     action: str
 
 
-@router.get("/admin/tasks", response_model=List[AuditTask])
+@router.get("/admin/tasks", response_model=list[AuditTask])
 async def get_pending_tasks(
-    risk_level: Optional[str] = None,
+    risk_level: str | None = None,
     current_admin_id: int = Depends(get_admin_user_id)
 ):
     """
@@ -80,20 +90,55 @@ async def get_pending_tasks(
         
         result = await session.execute(stmt)
         audit_logs = result.scalars().all()
-        
-        # 转换为响应格式
-        tasks = []
-        for log in audit_logs: 
-            session_result = await session.exec(
+
+        # P1-2 收尾：批量预取 ConversationSession，消除 N+1 查询。
+        # 之前每条 audit_log 单独查询 conversation，任务量大时放大 DB 压力；
+        # 改为先收集 thread_ids，一次 select，再用 dict 查找。
+        thread_ids = {log.thread_id for log in audit_logs if log.thread_id}
+        conversations_by_thread: dict[str, Any] = {}
+        if thread_ids:
+            conv_result = await session.execute(
                 select(ConversationSession).where(
-                    ConversationSession.checkpoint_thread_id == log.thread_id
+                    ConversationSession.checkpoint_thread_id.in_(thread_ids)
                 )
             )
-            conversation = session_result.first()
+            conversations_by_thread = {
+                c.checkpoint_thread_id: c
+                for c in conv_result.scalars().all()
+                if c.checkpoint_thread_id
+            }
+
+        # 转换为响应格式
+        tasks = []
+        for log in audit_logs:
+            conversation = conversations_by_thread.get(log.thread_id)
             memory = conversation.working_memory_json if conversation else {}
             slots = memory.get("collected_slots") if isinstance(memory, dict) else {}
             slots = slots if isinstance(slots, dict) else {}
             last_result = memory.get("last_tool_result") if isinstance(memory, dict) else None
+            tool_outcome = last_result.get("tool_outcome") if isinstance(last_result, dict) else None
+            eligibility = (
+                {k: last_result.get(k) for k in ("eligibility_checked", "eligibility_passed", "eligibility_message")}
+                if isinstance(last_result, dict) else None
+            )
+            # P2: 独立暴露 refund_amount / risk_level，源自最近一次 ToolOutcome.data。
+            # 管理员审批无需重新询问用户即可获得核心决策数据。
+            outcome_data = (tool_outcome or {}).get("data") if isinstance(tool_outcome, dict) else None
+            refund_amount = None
+            refund_risk_level = None
+            refund_status = None
+            if isinstance(outcome_data, dict):
+                if "refund_amount" in outcome_data:
+                    refund_amount = str(outcome_data.get("refund_amount"))
+                if "risk_level" in outcome_data:
+                    refund_risk_level = str(outcome_data.get("risk_level"))
+                if "status" in outcome_data:
+                    refund_status = str(outcome_data.get("status"))
+            # 回退到 context_snapshot（refund 工具在成功路径写入）
+            if refund_amount is None and isinstance(log.context_snapshot, dict):
+                refund_block = log.context_snapshot.get("refund") or {}
+                if isinstance(refund_block, dict) and refund_block.get("refund_amount"):
+                    refund_amount = str(refund_block["refund_amount"])
             tasks.append(AuditTask(
                 audit_log_id=log.id,
                 thread_id=log.thread_id,
@@ -108,11 +153,16 @@ async def get_pending_tasks(
                 active_order_sn=memory.get("active_order_sn") if isinstance(memory, dict) else None,
                 refund_reason=slots.get("refund_reason"),
                 refund_reason_category=memory.get("refund_reason_category") if isinstance(memory, dict) else None,
-                eligibility_result={k: last_result.get(k) for k in ("eligibility_checked", "eligibility_passed", "eligibility_message")}
-                    if isinstance(last_result, dict) else None,
-                last_tool_outcome=last_result.get("tool_outcome") if isinstance(last_result, dict) else None,
+                eligibility_result=eligibility,
+                last_tool_outcome=tool_outcome,
+                refund_amount=refund_amount,
+                refund_risk_level=refund_risk_level,
+                refund_status=refund_status,
+                refund_application_id_extra=log.refund_application_id,
+                workflow_stage=memory.get("workflow_stage") if isinstance(memory, dict) else None,
+                user_confirmed=bool(slots.get("user_confirmed")) if isinstance(slots, dict) else None,
             ))
-        
+
         return tasks
 
 
