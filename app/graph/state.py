@@ -47,6 +47,11 @@ class AgentState(TypedDict):
     # P1 修复: 退款原因分类枚举，由 SlotExtraction 一次产出，写入工作记忆，
     # 提交退款工具通过 InjectedState 直接消费，避免 LLM 二次映射。
     refund_reason_category: NotRequired[str | None]
+    # P1: 用户对退款申请的显式确认标志。前端按钮回传 user_confirmed=True；
+    # prepare_turn 从 collected_slots.user_confirmed 同步到顶层，让退款工具通过
+    # InjectedState("user_confirmed") 直接校验；persist_turn 反向同步回 collected_slots，
+    # 保证持久化真源仍为 collected_slots。
+    user_confirmed: NotRequired[bool | None]
     
     # v4.0 新增：结构化消息列表
     messages: Annotated[list[BaseMessage], add_messages]

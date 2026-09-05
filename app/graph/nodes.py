@@ -11,7 +11,6 @@ from sqlmodel import select
 from app.core.config import settings
 from app.core.database import async_session_maker
 from app.graph.state import AgentState
-from app.graph.tools import refund_tools
 from app.models.order import Order
 from app.services.policy_answer_guard import (
     INTERNAL_LLM_TAG,
@@ -447,32 +446,32 @@ def select_refund_context_messages(
 
 
 async def refund_agent(state: AgentState) -> dict:
-    """退款 Agent：模型自主选择受控工具，身份信息由 ToolNode 注入。"""
-    messages: list[BaseMessage] = select_refund_context_messages(
-        list(state.get("messages", [])), state["question"]
-    )
+    """退款 Agent：P1 起委派给 6 阶段显式 FSM 子图。
 
-    slots = state.get("collected_slots", {})
-    memory_context = (
-        "\n\n当前已确认的会话信息（不要重复询问）："
-        f"订单号={state.get('active_order_sn') or slots.get('order_sn') or '未确认'}；"
-        f"退款原因={slots.get('refund_reason') or '未确认'}；"
-        f"仍缺字段={state.get('pending_slots', [])}；"
-        f"摘要={state.get('conversation_summary') or '无'}。"
-        "只有仍缺失的字段才可以向用户询问。"
-    )
-    response = None
-    async for chunk in llm.bind_tools(refund_tools).astream(
-        [SystemMessage(content=REFUND_AGENT_PROMPT + memory_context), *messages]
-    ):
-        response = chunk if response is None else response + chunk
+    旧版基于 LLM 自由 tool loop 的实现已废弃（保留 REFUND_AGENT_PROMPT 以兼容测试）。
+    行为差异：
+      - 不再让 LLM 自由选择工具；每个阶段只做一件事。
+      - DB 短路：order_id 已有 RefundApplication 时跳过 submit。
+      - 用户确认：user_confirmed 缺失时拒绝调工具并返回友好提示。
+    """
+    from app.graph.workflows.refund import build_refund_subgraph
 
-    if response is None:
-        return {"answer": "抱歉，暂时无法处理退款请求，请稍后重试。"}
-    result: dict = {"messages": [response]}
-    if not response.tool_calls:
-        result["answer"] = response.content
-    return result
+    subgraph = build_refund_subgraph()
+    result = await subgraph.ainvoke(state)
+    # 子图返回完整 state；只取 AgentState 顶层字段回写（避免回写中间计算字段）
+    return {
+        key: value
+        for key, value in result.items()
+        if key in {
+            "workflow_stage",
+            "collected_slots",
+            "last_tool_result",
+            "active_order_id",
+            "active_order_sn",
+            "answer",
+            "messages",
+        }
+    }
 
 
 def should_call_refund_tool(state: AgentState) -> str:

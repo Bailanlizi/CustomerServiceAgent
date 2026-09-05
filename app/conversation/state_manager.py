@@ -19,6 +19,9 @@ MEMORY_KEYS = (
     "active_domain", "active_order_id", "active_order_sn", "conversation_goal",
     "collected_slots", "pending_slots", "workflow_stage", "last_tool_result",
     "next_action", "conversation_summary", "refund_reason_category",
+    # P1: 顶层 user_confirmed 与 collected_slots.user_confirmed 互相同步；
+    # 顶层用于工具签名 InjectedState，collected_slots 是用户确认意图的真源。
+    "user_confirmed",
 )
 SUMMARY_TRIGGER_TURNS = 6
 # P1 修复: 客服平均对话 4-8 轮，12 触发偏晚；保留 3 轮又可能裁掉 ORDER 查询
@@ -91,6 +94,9 @@ def default_working_memory() -> dict[str, Any]:
         "next_action": None,
         "conversation_summary": None,
         "refund_reason_category": None,
+        # P1: 顶层 user_confirmed 是工具签名 InjectedState("user_confirmed") 的入口；
+        # 真源仍在 collected_slots.user_confirmed，由 prepare_turn / persist_turn 双向同步。
+        "user_confirmed": None,
     }
 
 
@@ -205,6 +211,11 @@ class ConversationStateManager:
             slots["user_constraints"] = list(dict.fromkeys(
                 [*slots.get("user_constraints", []), *extraction.user_constraints]
             ))
+        # P1: 收集阶段已经把 collected_slots.user_confirmed 写好；这里把它提升到
+        # 顶层 user_confirmed，让 submit_refund_application 通过 InjectedState 拿到。
+        # 真源仍是 collected_slots，persist_turn 时再降级回去。
+        if slots.get("user_confirmed"):
+            memory["user_confirmed"] = True
         memory["collected_slots"] = slots
         # P1 修复: 将退款原因分类写入 working memory，让 submit_refund_application
         # 通过 InjectedState 直接消费，避免 LLM 在工具调用时再次做 free-text → enum 映射。
@@ -258,6 +269,12 @@ class ConversationStateManager:
         for key in MEMORY_KEYS:
             if key in state:
                 memory[key] = state[key]
+        # P1: 顶层 user_confirmed 由子图/工具写入；这里降级到 collected_slots
+        # 作为持久化真源。下一次 prepare_turn 再提升到顶层，避免工作记忆真源丢失。
+        if memory.get("user_confirmed"):
+            slots = dict(memory.get("collected_slots") or {})
+            slots["user_confirmed"] = True
+            memory["collected_slots"] = slots
         order_data = state.get("order_data")
         if isinstance(order_data, dict) and order_data.get("id") and order_data.get("order_sn"):
             memory["active_order_id"] = order_data["id"]

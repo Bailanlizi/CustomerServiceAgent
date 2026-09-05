@@ -104,6 +104,9 @@ async def submit_refund_application(
         str | None,
         InjectedState("refund_reason_category"),
     ] = None,
+    # P1: 用户确认标志。子图 SUBMITTED 节点已校验过 user_confirmed，
+    # 这里再做一次兜底（防止 free-form Tool loop 阶段被 LLM 绕过 FSM）。
+    user_confirmed: Annotated[bool | None, InjectedState("user_confirmed")] = None,
 ) -> str:
     """
     提交退货申请。
@@ -128,6 +131,12 @@ async def submit_refund_application(
     # ========== 前置校验: 用户身份 ==========
     if not user_id:
         return "❌ 缺少用户身份，无法提交退款申请。"
+    # ========== 前置校验: 用户确认（P1-4）==========
+    if not user_confirmed:
+        return (
+            "❌ 尚未确认申请信息。请在前端界面点击「确认提交」按钮，"
+            "确认订单号、退款原因与退款金额后再发起提交。"
+        )
     # ========== 前置校验: 退款原因 ==========
     slots = reason_detail if isinstance(reason_detail, dict) else {}
     reason_text = slots.get("refund_reason") if isinstance(slots, dict) else None

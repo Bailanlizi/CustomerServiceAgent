@@ -56,6 +56,15 @@ async def chat(
                 checkpoint_thread_id=f"test:{current_user_id}:{client_session_id}",
             )
             memory = default_working_memory()
+        # P1: 前端「确认提交」按钮回传 user_confirmed=True；写入 working memory 顶层
+        # 与 collected_slots，由子图节点读 user_confirmed 推进到 SUBMITTED 阶段。
+        # prepare_turn 后续会自动把 collected_slots.user_confirmed 提升到顶层，
+        # 这里同时显式写入确保 prepare_turn 之后的状态正确。
+        if request.user_confirmed:
+            slots = dict(memory.get("collected_slots") or {})
+            slots["user_confirmed"] = True
+            memory["collected_slots"] = slots
+            memory["user_confirmed"] = True
     except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found") from exc
     except ConversationForbiddenError as exc:
@@ -126,9 +135,16 @@ async def chat(
                 payload = json.dumps({"token": fallback_answer}, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
 
+            # P1: SSE 流结束时发出 stage 字段，让前端能感知当前 refund FSM 阶段。
+            # 非 REFUND 领域时 stage 为 null，前端忽略即可。
             if hasattr(app_graph, "aget_state"):
                 snapshot = await app_graph.aget_state(config)
                 values = dict(snapshot.values)
+                stage_payload = json.dumps({
+                    "type": "stage",
+                    "workflow_stage": values.get("workflow_stage"),
+                }, ensure_ascii=False)
+                yield f"data: {stage_payload}\n\n"
                 compacted = await conversation_manager.persist_turn(conversation, values)
                 messages = list(values.get("messages") or [])
                 retained = conversation_manager.retained_messages(messages)

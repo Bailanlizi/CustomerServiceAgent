@@ -91,6 +91,9 @@ def _build_tool_graph(tool_fn):
         collected_slots: dict
         refund_reason_category: str | None
         thread_id: str
+        # P1: submit_refund_application 通过 InjectedState("user_confirmed") 读取
+        # 用户确认标志；测试必须显式声明该字段以满足 LangGraph runtime 要求。
+        user_confirmed: bool | None
 
     workflow = StateGraph(S)
     workflow.add_node("tools", ToolNode([tool_fn]))
@@ -130,6 +133,8 @@ async def test_submit_refund_rejects_when_refund_reason_missing_from_state():
     graph = _build_tool_graph(submit_refund_application)
     # LLM 试图在 args 里塞一个伪造的 reason_detail（来自 prompt 的"建议值"），
     # 但 InjectedState 字段以 working memory 为准，因此必须报错。
+    # P1: user_confirmed=True 让前置校验顺序推进到 refund_reason 检查，
+    # 不会因为 user_confirmed 缺失而误返回。
     result = await graph.ainvoke(
         {
             "messages": [AIMessage(content="", tool_calls=[{
@@ -142,6 +147,7 @@ async def test_submit_refund_rejects_when_refund_reason_missing_from_state():
             "active_order_sn": "SN20240003",
             "collected_slots": {},
             "refund_reason_category": "QUALITY_ISSUE",
+            "user_confirmed": True,
         },
         config={"configurable": {"thread_id": "test-thread-1"}},
     )
@@ -182,7 +188,8 @@ async def test_submit_refund_uses_injected_reason_text_in_audit():
     阶段"间接证明两个字段都被正确消费，避免污染数据库。
 
     若走到提交分支会真创建退款记录，污染数据；这里用 SN20240002 (PENDING) 必然
-    被状态规则拒绝，从而在创建前退出，可重复运行。"""
+    被状态规则拒绝，从而在创建前退出，可重复运行。
+    P1: user_confirmed=True 让前置校验通过到资格检查分支。"""
     graph = _build_tool_graph(submit_refund_application)
     result = await graph.ainvoke(
         {
@@ -196,6 +203,7 @@ async def test_submit_refund_uses_injected_reason_text_in_audit():
             "active_order_sn": "SN20240002",
             "collected_slots": {"refund_reason": "尺码不合适"},
             "refund_reason_category": "SIZE_NOT_FIT",
+            "user_confirmed": True,
         },
         config={"configurable": {"thread_id": "test-thread-3"}},
     )
@@ -204,6 +212,37 @@ async def test_submit_refund_uses_injected_reason_text_in_audit():
     # 都从 working memory 正确读取——若任一字段被错误地以空字符串传入工具，会在
     # 前置校验阶段就返回"缺少..."，不会进入资格校验。
     assert "订单状态为 PENDING" in content or "退货申请已提交" in content
+
+
+@pytest.mark.asyncio
+async def test_submit_refund_rejects_when_user_not_confirmed():
+    """P1-4 验收: 未确认的退款申请必须被工具拒绝。
+
+    user_confirmed=False 时，submit_refund_application 必须直接返回
+    "❌ 尚未确认申请信息"，不进入 refund_reason / 资格校验阶段。
+    """
+    graph = _build_tool_graph(submit_refund_application)
+    result = await graph.ainvoke(
+        {
+            "messages": [AIMessage(content="", tool_calls=[{
+                "name": "submit_refund_application",
+                "args": {},
+                "id": "call-no-confirm",
+            }])],
+            "user_id": 1,
+            "thread_id": "t-no-confirm",
+            "active_order_sn": "SN20240003",
+            "collected_slots": {"refund_reason": "尺码不合适"},
+            "refund_reason_category": "SIZE_NOT_FIT",
+            "user_confirmed": False,
+        },
+        config={"configurable": {"thread_id": "test-no-confirm"}},
+    )
+    content = result["messages"][-1].content
+    assert "❌" in content
+    assert "确认" in content or "未确认" in content
+    # 必须不进入提交分支（避免污染数据库）
+    assert "退货申请已提交" not in content
 
 
 async def run_tools_demo():

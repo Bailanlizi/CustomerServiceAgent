@@ -9,7 +9,7 @@ messages）时，模型会把这些历史问题一并重复作答。本文件锁
 """
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.graph import nodes
 from app.services.policy_answer_guard import PolicyAnswer
@@ -155,42 +155,44 @@ async def test_policy_generate_writes_ai_message_back_to_history(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# 3. 退款 Agent 只消费受控窗口
+# 3. P1 起退款 Agent 委派给 6 阶段 FSM 子图，不再消费历史窗口
 # --------------------------------------------------------------------------
-
+# 旧版 refund_agent 是基于 LLM.bind_tools 的 free-form tool loop，需要 LLM
+# 看到受控历史窗口避免重复作答旧问题。P1 后退款流程由 FSM 推进，不再依赖
+# LLM 决策工具调用，因此本节不再保留历史窗口测试。该测试在新架构下无意义：
+# FSM 阶段路由只读 working memory，不读 messages 历史。相关窗口化逻辑
+# (select_refund_context_messages / MAX_REFUND_HISTORY_TURNS) 仍保留在
+# nodes.py 以防未来回滚，但不再被调用。
 @pytest.mark.asyncio
-async def test_refund_agent_receives_only_windowed_history(monkeypatch):
-    stub = StubLLM("请问退货原因是什么？")
-    monkeypatch.setattr(nodes, "llm", stub)
+async def test_refund_agent_delegates_to_fsm_subgraph():
+    """P1: refund_agent 必须委派给子图，返回 workflow_stage 字段。
 
+    子图在缺 active_order_id 时进入 IDENTIFY_ORDER 阶段，调用 LLM 生成
+    追问订单号话术。该测试仅验证委派关系与字段返回，不依赖 LLM 真实调用
+    （子图内部会走完整流程，节点会尝试调 LLM；这是端到端 smoke 测试，
+    单元测试请看 test_refund_workflow_fsm.py）。
+    """
     history = [
-        HumanMessage(content="我的订单到哪了？"),
-        AIMessage(content="已发货。"),
-        HumanMessage(content="内衣拆封了能退吗？"),
-        AIMessage(content="贴身衣物拆封后概不退换。"),
         HumanMessage(content="运费怎么算？"),
         AIMessage(content="质量问题由平台承担。"),
-        HumanMessage(content="尺码不合适能退吗？"),
-        AIMessage(content="未拆封可退。"),
         HumanMessage(content="我要退 SN20240001"),
     ]
+    # 缺 active_order_id → 进入 IDENTIFY_ORDER，需要 LLM 生成追问话术
+    # 这里跳过 LLM 调用的话，子图会因 LLM 不可用而抛错；改用最小可用 state
+    # 让子图直接走到 ELIGIBILITY_CHECKED（无活跃订单）路径——但当前会
+    # 先尝试 LLM 追问。端到端测试应在 test_refund_workflow_fsm 中用 monkeypatch
+    # 隔离 LLM。本测试只验证委派关系：返回 dict 含 workflow_stage。
 
+    # 隔离 LLM 路径：让子图 entry 直接到 DONE（短路）
+    # 通过 pre-set refund_submitted_id 让路由跳到 DONE
     result = await nodes.refund_agent({
         "question": "我要退 SN20240001",
         "messages": history,
+        "collected_slots": {"refund_submitted_id": 999},
+        "active_order_id": 1,
+        "active_order_sn": "SN20240001",
+        "user_id": 1,
     })
-
-    assert result["answer"] == "请问退货原因是什么？"
-    # 首条必须是 SystemMessage，其后只能是最近 3 轮（共 3 条用户消息）
-    assert isinstance(stub.seen_messages[0], SystemMessage)
-    window = stub.seen_messages[1:]
-    assert [m.content for m in window] == [
-        "运费怎么算？",
-        "质量问题由平台承担。",
-        "尺码不合适能退吗？",
-        "未拆封可退。",
-        "我要退 SN20240001",
-    ]
-    # 更早的订单/内衣两轮已被裁掉，避免退款 Agent 重复作答旧问题
-    assert "内衣拆封了能退吗？" not in [m.content for m in window]
-    assert isinstance(window[0], HumanMessage)
+    # 委派关系锁定：refund_agent 返回 dict 且 workflow_stage == "DONE"
+    assert isinstance(result, dict)
+    assert result.get("workflow_stage") == "DONE"

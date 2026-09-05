@@ -11,12 +11,12 @@ from pathlib import Path
 #  顶层 app 包不可见，会导致 No module named 'app'）。
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import gradio as gr
-import requests
 import json
 import os
 import uuid
-from typing import List, Dict, Optional, Tuple
+
+import gradio as gr
+import requests
 from gradio import themes
 
 # 配置
@@ -25,7 +25,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 
 class ChatClient:
     """聊天客户端 - 支持真实登录"""
-    
+
     def __init__(self, token: str, user_id: int, username: str, client_session_id: str):
         self.token = token
         self.user_id = user_id
@@ -34,21 +34,29 @@ class ChatClient:
         self.conversation_id = None
         # Kept for status compatibility until that API is migrated.
         self.thread_id = None
+        # P1: 最近一次 chat 响应的 workflow_stage，由 SSE 流末尾的 stage 字段填充；
+        # 前端据此显示「确认提交」按钮。
+        self.last_stage: str | None = None
         print(f"✅ 客户端已初始化:  用户={username}, ID={user_id}")
     
-    def send_message(self, message: str) -> Tuple[bool, str, dict]:
-        """发送消息到 Agent"""
+    def send_message(self, message: str, user_confirmed: bool = False) -> tuple[bool, str, dict]:
+        """发送消息到 Agent。
+
+        user_confirmed: P1 - 用户在 WAITING_CONFIRMATION 阶段点击「确认提交」按钮后，
+        把上一轮 AI 话术作为 question 重新提交，并把 user_confirmed=True 写入请求体，
+        让 refund FSM 子图进入 SUBMITTED 阶段。
+        """
         if not message.strip():
             return False, "消息不能为空", {}
-        
+
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
-        
+
         try:
-            print(f"📤 [{self.username}] 发送消息: {message}")
-            
+            print(f"📤 [{self.username}] 发送消息: {message} (user_confirmed={user_confirmed})")
+
             response = requests.post(
                 f"{API_BASE_URL}/chat",
                 headers=headers,
@@ -56,6 +64,7 @@ class ChatClient:
                     "question": message,
                     "client_session_id": self.client_session_id,
                     "conversation_id": self.conversation_id,
+                    "user_confirmed": user_confirmed,
                 },
                 stream=True,
                 timeout=60
@@ -86,6 +95,9 @@ class ChatClient:
                             elif data.get('type') == 'session':
                                 self.conversation_id = data['conversation_id']
                                 self.thread_id = f"conversation:{self.conversation_id}"
+                            elif data.get('type') == 'stage':
+                                # P1: SSE 流末尾的 stage 事件，更新 last_stage。
+                                self.last_stage = data.get('workflow_stage')
                             elif 'error' in data:
                                 return False, f"Agent 错误: {data['error']}", {}
                         except json.JSONDecodeError:
@@ -96,7 +108,7 @@ class ChatClient:
             return True, full_answer, status_info
             
         except Exception as e:
-            return False, f"请求失败: {str(e)}", {}
+            return False, f"请求失败: {e!s}", {}
     
     def check_status(self) -> dict:
         """检查会话状态"""
@@ -114,7 +126,7 @@ class ChatClient:
             return {}
 
 
-def login_user(username: str, password: str, client_session_id: str) -> Tuple[bool, str, Optional[ChatClient], str]:
+def login_user(username: str, password: str, client_session_id: str) -> tuple[bool, str, ChatClient | None, str]:
     """
     用户登录
     
@@ -155,7 +167,7 @@ def login_user(username: str, password: str, client_session_id: str) -> Tuple[bo
             return False, f"❌ {error}", None, ""
             
     except Exception as e: 
-        return False, f"❌ 登录失败:  {str(e)}", None, ""
+        return False, f"❌ 登录失败:  {e!s}", None, ""
 
 
 def create_chat_interface():
@@ -317,7 +329,18 @@ def create_chat_interface():
                             autofocus=True
                         )
                         submit_btn = gr.Button( variant="primary", scale=1, min_width=60)
-                    
+
+                    # P1: 退款确认按钮。仅在 last_stage == "WAITING_CONFIRMATION" 时可见；
+                    # 用户点击后回传 user_confirmed=True 进入 SUBMITTED 阶段。
+                    # visible=gr.update(visible=True) 由 confirm_and_send 内部根据 last_stage 切换。
+                    with gr.Row():
+                        confirm_btn = gr.Button(
+                            "✅ 确认提交退款",
+                            variant="primary",
+                            visible=False,
+                            scale=1,
+                        )
+
                     status_display = gr.HTML("")
 
                 # 右侧：功能面板 (占宽 25%)
@@ -398,41 +421,72 @@ def create_chat_interface():
             """适配 Gradio 4.0 messages 格式的消息处理"""
             if not client:
                 gr.Warning("会话已过期，请重新登录")
-                yield history, message, ""
+                yield history, message, "", gr.update(visible=False)
                 return
 
             if not message.strip():
-                yield history, message, ""
+                yield history, message, "", gr.update(visible=False)
                 return
-            
+
             # 立即上屏用户消息
             history.append({"role": "user", "content": message})
-            yield history, "", '<span class="status-badge" style="background:#e0f2fe; color:#0369a1;">Thinking...</span>'
-            
+            yield history, "", '<span class="status-badge" style="background:#e0f2fe; color:#0369a1;">Thinking...</span>', gr.update(visible=False)
+
             success, response, status_info = client.send_message(message)
-            
+
             if not success:
                 history.append({"role": "assistant", "content": f"❌ Error: {response}"})
-                yield history, "", '<span class="status-badge" style="background:#fee2e2; color:#b91c1c;">Error</span>'
+                yield history, "", '<span class="status-badge" style="background:#fee2e2; color:#b91c1c;">Error</span>', gr.update(visible=False)
                 return
-            
+
             # 处理回复内容
             final_content = response
             status = status_info.get("status", "PROCESSING")
-            
+
             # 追加漂亮的 HTML 卡片
             if status in ["WAITING_ADMIN", "APPROVED", "PROCESSING", "REJECTED"]:
                 final_content += render_audit_card_v2(status_info)
-            
+
             history.append({"role": "assistant", "content": final_content})
-            
+
             status_text = "Ready"
             status_color = "#dcfce7; color:#15803d" # Green
             if status == "WAITING_ADMIN":
                 status_text = "Waiting Audit"
                 status_color = "#fef3c7; color:#b45309" # Yellow
-            
-            yield history, "", f'<span class="status-badge" style="background:{status_color};">📡 {status_text}</span>'
+
+            # P1: 根据 last_stage 切换 confirm_btn 可见性。
+            # WAITING_CONFIRMATION 时显示按钮；其他阶段（DONE / COLLECT_REASON / 等）隐藏。
+            confirm_visible = client.last_stage == "WAITING_CONFIRMATION"
+            yield history, "", f'<span class="status-badge" style="background:{status_color};">📡 {status_text}</span>', gr.update(visible=confirm_visible)
+
+
+        def confirm_and_send(history, client):
+            """P1: 用户点击「确认提交」按钮的回传逻辑。
+
+            把上一轮退款确认话术作为 question 重新提交，并把 user_confirmed=True
+            写入请求体；后端 refund FSM 子图据此进入 SUBMITTED 阶段。
+            """
+            if not client:
+                gr.Warning("会话已过期，请重新登录")
+                yield history, gr.update(visible=False)
+                return
+
+            # 用"确认提交"作为提问触发后端再次进入 refund FSM
+            message = "确认提交退款申请"
+            history.append({"role": "user", "content": message})
+            yield history, gr.update(visible=False)  # 立即隐藏按钮
+
+            success, response, status_info = client.send_message(message, user_confirmed=True)
+
+            final_content = response if success else f"❌ Error: {response}"
+            status = status_info.get("status", "PROCESSING") if success else "ERROR"
+            if success and status in ["WAITING_ADMIN", "APPROVED", "PROCESSING", "REJECTED"]:
+                final_content += render_audit_card_v2(status_info)
+            history.append({"role": "assistant", "content": final_content})
+
+            # SUBMITTED 之后 stage 通常是 DONE；按钮隐藏
+            yield history, gr.update(visible=False)
 
         # === 绑定事件 ===
         login_btn.click(
@@ -450,15 +504,22 @@ def create_chat_interface():
         msg_input.submit(
             send_and_update_v2,
             inputs=[msg_input, chatbot, client_state],
-            outputs=[chatbot, msg_input, status_display]
+            outputs=[chatbot, msg_input, status_display, confirm_btn],
         )
         submit_btn.click(
             send_and_update_v2,
             inputs=[msg_input, chatbot, client_state],
-            outputs=[chatbot, msg_input, status_display]
+            outputs=[chatbot, msg_input, status_display, confirm_btn],
+        )
+
+        # P1: 退款确认按钮
+        confirm_btn.click(
+            confirm_and_send,
+            inputs=[chatbot, client_state],
+            outputs=[chatbot, confirm_btn],
         )
         
-        clear_btn.click(lambda: [], outputs=[chatbot])
+        clear_btn.click(list, outputs=[chatbot])
 
         def start_new_session(client):
             new_id = str(uuid.uuid4())
