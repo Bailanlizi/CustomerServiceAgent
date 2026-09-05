@@ -150,27 +150,68 @@ IDLE
 保留 LangChain `@tool` 的兼容性，在其外部建立独立注册表和统一 `ToolGuard`，不向框架装饰器塞非标准参数。
 
 ```python
+@dataclass(frozen=True)
 class ToolCapability:
-    domain: str
-    requires_stages: set[str]
-    requires_slots: set[str]
-    requires_eligibility: str | None
-    idempotency_key_template: str | None
-    writes_to_conversation: bool
-    audit_level: Literal["read", "write", "sensitive"]
+    name: str                                          # 工具名（Registry 内唯一）
+    domain: str                                        # 所属业务领域：ORDER / REFUND / POLICY
+    allowed_stages: frozenset[str]                     # 允许的工作流阶段；含 "*" 表示全阶段通配（只读工具用）
+    required_slots: frozenset[str] = frozenset()       # 调用前必须存在的槽位 / state 字段
+    required_eligibility: str | None = None            # last_tool_result.eligibility_passed 必须为 True 的语义标签
+    requires_user_confirmation: bool = False           # 是否需要 state.user_confirmed
+    idempotency_key_template: str | None = None        # 写工具的幂等键模板（仅 writes_to_conversation=True 时允许）
+    writes_to_conversation: bool = False               # 是否会修改会话侧状态（注册时强制：写工具审计钩子必须开启）
+    audit_level: str = "read"                          # "read" | "sensitive"；sensitive 必须配 writes_to_conversation=True
+    owner_workflow: str = ""                           # 所属工作流（用于审计追溯与 admin 展示）
 ```
 
-调用路径：
+调用路径（`ToolCapabilityRegistry.invoke`，已落地顺序）：
 
 ```text
-Workflow 选择工具
-  → ToolGuard 校验领域、阶段、槽位、资格、权限和幂等条件
+Workflow / ToolNode 选择工具
+  → Guard 按序校验：
+       1. 域（active_domain / intent 与 capability.domain 一致）
+       2. 阶段（"*" 通配 OR stage ∈ allowed_stages）
+       3. 槽位（state 与 collected_slots 同时检查）
+       4. 资格（last_tool_result.eligibility_passed is True）
+       5. 用户确认（state.user_confirmed）
+       6. 幂等键生成 + 进程内缓存命中
   → 执行既有 Tool / Service
-  → 返回结构化 ToolOutcome
-  → 更新工作记忆、审计和自然语言结果
+  → handler 异常被边界吞掉，映射为 ToolOutcome(ok=False, code=SYSTEM_ERROR, retryable=True)
+  → Registry 在 envelope 阶段自动填充 9 项元数据（tool_name / domain / workflow_stage /
+    conversation_id / thread_id / user_id / order_id / timestamp / idempotency_key）
+  → 写工具 + sensitive 审计触发 write_tool_audit_log：
+       ok    → AuditAction.PENDING
+       !ok   → AuditAction.REJECT
+  → 同一 idempotency_key 第二次进入 Registry 时直接复用上次成功 outcome（仅缓存 ok=True）
 ```
 
+`ToolOutcome` 字段：
+
+| 组 | 字段 | 来源 |
+| --- | --- | --- |
+| 业务 | `ok` / `code` / `message` / `data` / `retryable` / `idempotency_key` | handler / 业务层 |
+| 审计元数据 | `tool_name` / `domain` / `workflow_stage` / `conversation_id` / `thread_id` / `user_id` / `order_id` / `timestamp` | Registry 自动 envelope |
+
+`ToolCode` 枚举（`app/graph/tool_registry.py`）：`SUCCESS` / `ELIGIBILITY_PASSED` / `ELIGIBILITY_REJECTED` / `REFUND_SUBMITTED` / `ALREADY_EXISTS` / `MISSING_SLOT` / `NOT_AUTHORIZED` / `INVALID_STAGE` / `NOT_CONFIRMED` / `BUSINESS_REJECTED` / `TEMPORARY_FAILURE` / `SYSTEM_ERROR`。
+
+#### P2 已登记能力清单（落地状态）
+
+| 工具名 | domain | allowed_stages | 关键约束 | 审计 |
+| --- | --- | --- | --- | --- |
+| `check_refund_eligibility` | REFUND | `{ELIGIBILITY_CHECKED}` | 需 `active_order_sn` + `user_id` | read |
+| `submit_refund_application` | REFUND | `{WAITING_CONFIRMATION, SUBMITTED}` | 需 `active_order_id/sn` + `refund_reason` + `refund_reason_category`，资格通过，用户确认；幂等键 `refund:{user_id}:{order_id}` | sensitive |
+| `query_refund_status` | REFUND | 全 8 个退款阶段 | 需 `user_id` | read |
+| `query_order_tool` | ORDER | `{"*"}`（全阶段通配） | 需 `user_id` | read |
+
+#### 三道防线（注册校验 + Guard + 业务层）
+
+1. **注册校验**：`register()` 强制 `allowed_stages` 非空、`idempotency_key_template` 仅写工具可用、`audit_level=sensitive` 必须配 `writes_to_conversation=True`；重复注册直接抛错。
+2. **Guard 拒绝**：7 步检查任一失败直接返回结构化 `ToolOutcome(code=...)`，handler 不执行；FSM / ToolNode 两条入口共享同一拒因。
+3. **业务层**：`RefundApplication.order_id` 物理唯一约束 + Registry 进程内 `_idempotency_cache`（先于 DB 命中）双层短路，并发提交由 `IntegrityError` 兜底。
+
 示例：`submit_refund_application` 必须要求已确认订单、退款原因、资格通过、`WAITING_CONFIRMATION` 阶段和用户确认；任何模型误调用都由 ToolGuard 拒绝。
+
+`GuardedToolExecutor` 是 Registry 的薄封装（`app/graph/tool_registry.py`），是 workflow 节点与 LangChain `@tool` 薄壳的**唯一入口**，避免出现绕过 Guard 的裸 ToolNode 路径。
 
 ### 6.2 自然语言输出
 
@@ -192,16 +233,19 @@ app/
     transition_resolver.py    domain 连续/切换判断
   graph/
     orchestrator.py           Thin Orchestrator
-    tool_registry.py          ToolCapability 与 ToolGuard
+    tool_registry.py          ToolCapability / ToolGuard / ToolOutcome / GuardedToolExecutor / 审计钩子
+    tools.py                  core_* handler + LangChain @tool 薄壳（薄壳只路由到 Guard）
     workflows/
-      order.py                OrderWorkflow 子图
-      refund.py               RefundWorkflow 子图
+      refund.py               RefundWorkflow 子图（FSM + 工具登记 + 状态更新）
+      order.py                OrderWorkflow 子图（P3 占位）
   services/
     refund_service.py         保留业务规则与数据库操作
     policy_*                  保持现有政策检索与 Guardrail
 ```
 
 现有 `app/graph/nodes.py` 中的意图路由、订单查询、政策回答和退款 Agent 应按阶段逐步迁移，避免一次性重写。
+
+`app/graph/tool_registry.py` 是 P2 落地的关键模块：ToolCapability / ToolGuard / ToolOutcome / GuardedToolExecutor / write_tool_audit_log 五件事统一在此维护；workflow 与 `@tool` 薄壳都通过 `GuardedToolExecutor.invoke(...)` 接入，禁止出现绕过 Registry 的并行路径。
 
 ## 8. 实施阶段与验收
 
@@ -228,7 +272,17 @@ app/
 - 为所有退款写操作和核心订单工具登记阶段、槽位、审计和幂等约束；
 - 在管理员退款队列显示 conversation summary、关键槽位和最近工具结果。
 
-验收：模型在错误阶段调用工具时被确定性拒绝；管理员审批无需重新询问订单、原因和资格结果。
+验收（按 P2 收尾后实测落地）：
+
+- **域 / 阶段 / 槽位 / 资格 / 确认拒绝路径**：模型在错误阶段、错误领域、缺槽位、资格未通过或未确认时调用工具时被确定性拒绝，handler 不执行，FSM 与顶层 ToolNode 共享同一拒因（`ToolCode` 枚举 + `ToolOutcome` 透传）。
+- **元数据自动 envelope**：Registry 在 invoke 阶段用 `dataclasses.replace` 填充 `tool_name / domain / workflow_stage / conversation_id / thread_id / user_id / order_id / timestamp`，handler 只返回业务结果，FSM / admin / 审计读同一结构化字段。
+- **审计独立通道**：sensitive 工具（`submit_refund_application`）每次 outcome 都通过 `write_tool_audit_log` 写入 `AuditLog.decision_metadata + context_snapshot`，`AuditAction.PENDING`（成功）/ `AuditAction.REJECT`（失败）；写入失败不回滚业务结果。
+- **进程内幂等命中**：`submit_refund_application` 的 `idempotency_key_template="refund:{user_id}:{order_id}"` 在同一进程重复调用时直接复用上次成功 outcome（仅缓存 `ok=True`），与下层 `RefundApplication` 唯一约束形成双层短路。
+- **read-only 通配工具**：`query_order_tool`（domain=ORDER）以 `allowed_stages={"*"}` 在所有退款阶段可调用，跨域只读场景不被阶段校验误伤。
+- **管理员审批无需重问**：`AuditTask` 新增 `refund_amount / refund_risk_level / refund_status / workflow_stage / user_confirmed / last_tool_outcome`，数据从 `last_tool_result.tool_outcome.data` 与 `context_snapshot.refund` 双源读取；列表查询用 `WHERE thread_id IN (...)` 批量加载 `ConversationSession`，消除 N+1。
+- **handler 异常可控**：handler 抛异常时 Guard 边界包装为 `ToolOutcome(ok=False, code=SYSTEM_ERROR, retryable=True, data={"error_type": ...})`，不向上抛，FSM 可按 `retryable` 决定是否回退重试。
+
+测试位于 `test/test_tool_registry.py`（Registry / Guard / 元数据 envelope / 顶层 ToolNode / 管理员字段 28 用例），与 `test_refund_workflow_fsm.py` / `test_refund_tools.py` / `test_conversation_history.py` 共 54 用例全过；改动文件 ruff 干净。
 
 ### P3：领域工作流拆分
 

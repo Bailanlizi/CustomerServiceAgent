@@ -17,6 +17,7 @@
 *   **智能问答**：基于 LLM 的订单查询与政策咨询，意图识别采用结构化输出四分类（ORDER / POLICY / REFUND / OTHER）。
 *   **退货申请流程**：退款 Agent 自主选择受控工具（资格预检 / 提交申请 / 进度查询），缺参数时主动向用户索要；用户身份由 `InjectedState` 注入，越权查询被数据库层拦截。
 *   **退款安全闭环（资金操作全人工 + 幂等防重）**：所有退款申请不分金额统一进入人工审核，资金移动必须管理员批准；订单级唯一约束杜绝重复退款，支付任务以条件更新实现幂等抢占与卡死自动恢复，全程写入审计日志。
+*   **工具能力治理（ToolRegistry / GuardedToolExecutor / ToolOutcome）**：所有工具（含 LangChain `@tool` 薄壳）经统一的 `ToolCapabilityRegistry` 注册与 `GuardedToolExecutor` 路由，Guard 按域 / 阶段 / 槽位 / 资格 / 用户确认 5 步确定性校验，模型误调用直接结构化拒绝；`ToolOutcome` 由 Registry 自动 envelope 9 项审计元数据（`tool_name` / `domain` / `workflow_stage` / `conversation_id` / `thread_id` / `user_id` / `order_id` / `timestamp` / `idempotency_key`），FSM / 审计 / 管理员队列共享同一字段源；写工具按 `idempotency_key_template` 在 Registry 进程内缓存成功 outcome（双层短路之一），管理员审计列表用 `WHERE thread_id IN (...)` 批量加载 `ConversationSession` 消除 N+1。
 *   **实时状态同步**：通过 WebSocket 实现用户和管理员界面的实时状态更新。
 *   **管理员工作台**：Gradio 构建的 B 端界面，支持任务队列、会话回放、一键决策。
 *   **异步任务处理**：Celery 处理退款支付、短信通知等耗时操作。
@@ -95,8 +96,11 @@ retrieve 节点：向量检索 top-20 → 阈值过滤 → 权威重排 → top-
 │   ├── graph # LangGraph 核心逻辑
 │   │   ├── nodes.py # 节点定义 (意图路由, 检索, 生成, 退款 Agent, 结构化政策生成)
 │   │   ├── state.py # 图状态 (含 policy_evidence / policy_answer_audit)
-│   │   ├── tools.py # 退款工具 (资格预检, 提交申请, 进度查询)
-│   │   └── workflow.py # 工作流编排与编译
+│   │   ├── tool_registry.py # ToolCapability Registry + GuardedToolExecutor + ToolOutcome + 审计钩子
+│   │   ├── tools.py # core_* handler + LangChain @tool 薄壳（薄壳路由到 Registry）
+│   │   ├── workflow.py # 工作流编排与编译
+│   │   └── workflows/ # 领域子图
+│   │       └── refund.py # RefundWorkflow（IDLE→IDENTIFY_ORDER→COLLECT_REASON→ELIGIBILITY_CHECKED→WAITING_CONFIRMATION→SUBMITTED）
 │   ├── models # SQLModel ORM (订单, 知识库块, 退款, 审计, 消息卡片)
 │   ├── services # 业务服务层
 │   │   ├── policy_answer_guard.py # 政策回答引用校验 (确定性 Guardrail)
