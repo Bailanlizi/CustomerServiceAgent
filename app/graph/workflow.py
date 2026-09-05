@@ -66,17 +66,10 @@ workflow.add_node("refund_agent", refund_agent)
 workflow.add_node("generate", generate)
 workflow.add_node("intent_router", intent_router)
 
-# 入口与派发
-workflow.add_edge(START, "dispatch_router")
-
-# P3-1: 将 dispatch_router 建模为条件边
-def _route_dispatch(state: AgentState) -> str:
-    return dispatch_router(state)
-
-
+# 入口与派发：路由函数不产生状态更新，因此直接作为 START 条件入口。
 workflow.add_conditional_edges(
-    "dispatch_router",
-    _route_dispatch,
+    START,
+    dispatch_router,
     {
         "order_workflow": "order_workflow",
         "retrieve": "retrieve",

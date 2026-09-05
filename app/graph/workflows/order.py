@@ -113,6 +113,7 @@ async def node_query_order(state: AgentState) -> dict[str, Any]:
     outcome = await _executor.invoke(
         "query_order_tool",
         state=_workflow_state_dict(state),
+        arguments={"question": state.get("question", "")},
     )
     if outcome.ok:
         order_data = _outcome_to_order_data(outcome.data or {})

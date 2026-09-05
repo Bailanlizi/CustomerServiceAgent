@@ -108,6 +108,7 @@ async def test_node_query_order_success_writes_order_data(monkeypatch):
     """成功路径：outcome.ok=True → order_data 含 id/order_sn 回写 state。"""
 
     async def fake_invoke(name, *, state, arguments=None):
+        assert arguments == {"question": "我的订单"}
         return ToolOutcome(
             ok=True,
             code=ToolCode.SUCCESS,
@@ -238,3 +239,34 @@ async def test_order_subgraph_end_to_end(monkeypatch):
     assert result["order_data"]["id"] == 42
     assert result["order_data"]["order_sn"] == "SN20240001"
     assert "SN20240001" in result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_node_query_order_forwards_question_for_explicit_order_sn(monkeypatch):
+    """没有 active_order_sn 时，当前问题仍必须传给 core handler 解析订单号。"""
+    captured = {}
+
+    async def fake_invoke(name, *, state, arguments=None):
+        captured["arguments"] = arguments
+        return ToolOutcome(
+            ok=True,
+            code=ToolCode.SUCCESS,
+            message="订单号: SN20240001",
+            data={"order_id": 42, "order_sn": "SN20240001", "status": "SHIPPED"},
+        )
+
+    monkeypatch.setattr(order_module._executor, "invoke", fake_invoke)
+    await node_query_order({
+        "question": "查询订单 SN20240001",
+        "user_id": 7,
+        "active_domain": "ORDER",
+        "active_order_sn": None,
+    })
+    assert captured["arguments"] == {"question": "查询订单 SN20240001"}
+
+
+def test_main_workflow_compiles():
+    """主图入口接线必须能通过 LangGraph 编译校验。"""
+    from app.graph.workflow import workflow
+
+    workflow.compile()
