@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.database import engine
 
 # 2. 加上这个装饰器 (如果你没有在 pyproject.toml 配置 asyncio_mode=auto)
+@pytest.mark.external
 @pytest.mark.asyncio
 async def test_llm():
     print("🤖 Testing Qwen LLM Connection...")
@@ -22,6 +23,7 @@ async def test_llm():
     assert response.content is not None
     assert len(response.content) > 0
 
+@pytest.mark.external
 @pytest.mark.asyncio
 async def test_embedding():
     print("\n🧠 Testing Qwen Embedding...")
@@ -39,6 +41,7 @@ async def test_embedding():
     # 通常 embedding 维度是固定的（例如 1536 或 1024），你可以加上具体维度的检查
     # assert len(vector) == 1024 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_db():
     print("\n🗄️ Testing Database Connection...")

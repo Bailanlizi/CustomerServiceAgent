@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit and component tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Ruff
+        run: uv run ruff check app test/conftest.py test/integration
+      - name: Run deterministic tests
+        run: uv run pytest -q -m "not external and not integration"
+
+  integration:
+    name: Docker integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_NAME: E-commerce Smart Agent (CI)
+      API_V1_STR: /api/v1
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: 55432
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: customer_service_test
+      REDIS_HOST: localhost
+      REDIS_PORT: 56380
+      OPENAI_BASE_URL: http://llm-mock.invalid/v1
+      OPENAI_API_KEY: test-key
+      LLM_MODEL: test-model
+      EMBEDDING_MODEL: test-embedding
+      EMBEDDING_DIM: 3
+      SECRET_KEY: test-secret-key-only
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      RUN_INTEGRATION_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Start PostgreSQL and Redis
+        run: docker compose -f docker-compose.test.yml up -d db redis
+      - name: Wait for database
+        run: |
+          for i in {1..30}; do
+            docker compose -f docker-compose.test.yml exec -T db pg_isready -U test -d customer_service_test && break
+            sleep 2
+          done
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+      - name: Start Celery worker and beat
+        run: docker compose -f docker-compose.test.yml up -d celery_worker celery_beat
+      - name: Run integration tests
+        run: uv run pytest -q -m integration
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.test.yml logs --no-color
+      - name: Stop test services
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v

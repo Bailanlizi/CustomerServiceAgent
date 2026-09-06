@@ -11,6 +11,7 @@ v2.0 完整验收测试
 import asyncio
 import sys
 from pathlib import Path
+import pytest
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -20,6 +21,8 @@ from app.graph.workflow import compile_app_graph
 from app.core.security import create_access_token
 
 
+@pytest.mark.external
+@pytest.mark.asyncio
 async def test_v2():
     print("=" * 60)
     print("🚀 开始 v2.0 验收测试")
@@ -139,6 +142,8 @@ async def test_v2():
     print("=" * 60)
 
 
+@pytest.mark.external
+@pytest.mark.asyncio
 async def test_jwt_security():
     """测试 JWT 安全性"""
     print("\n🔐 JWT 安全性测试")

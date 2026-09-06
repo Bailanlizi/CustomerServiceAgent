@@ -48,6 +48,7 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "integration: requires test Docker services",
     "legacy_e2e: requires API/LLM services outside pytest",
+    "external: requires externally running API or LLM services",
 ]
 
 [tool.uv]

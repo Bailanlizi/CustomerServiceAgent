@@ -13,6 +13,7 @@ def event_loop():
 
     
 # 1. 必须使用这个装饰器，否则 pytest 找不到 query 变量
+@pytest.mark.external
 @pytest.mark.parametrize("query", [
     "内衣拆封了可以退吗？",
     "帮我写一个 Python 贪吃蛇游戏。",
