@@ -62,7 +62,15 @@ async def test_chat_sse_contract_with_deterministic_graph(client, unique_usernam
     async def fake_prepare_turn(*args, **kwargs):
         return default_working_memory()
 
+    async def fake_persist_turn(*args, **kwargs):
+        return False
+
+    async def fake_append_messages(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(chat_module.conversation_manager, "prepare_turn", fake_prepare_turn)
+    monkeypatch.setattr(chat_module.conversation_manager, "persist_turn", fake_persist_turn)
+    monkeypatch.setattr(chat_module.conversation_manager, "append_messages", fake_append_messages)
     payload = {
         "username": unique_username,
         "password": "password123",
