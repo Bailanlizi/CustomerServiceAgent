@@ -122,14 +122,17 @@ def create_admin_dashboard():
     """创建管理员工作台"""
     
     custom_css = """
-    . high-risk { background-color: #f8d7da; font-weight: bold; }
-    .medium-risk { background-color: #fff3cd; }
-    .low-risk { background-color: #d4edda; }
-    . task-header { font-size: 1.1em; font-weight: 600; margin-bottom: 12px; }
-    .context-box { background-color: #f8f9fa; padding: 16px; border-radius: 8px; margin:  8px 0; }
-    .order-box { background-color: #e7f3ff; padding: 16px; border-radius: 8px; margin: 8px 0; border-left: 4px solid #007bff; }
-    . decision-success { color: #28a745; font-weight: 600; }
-    .decision-error { color: #dc3545; font-weight: 600; }
+    /* 所有信息块采用同一中性卡片样式，避免按状态使用不同底色。 */
+    .task-header { font-size: 1.1em; font-weight: 600; margin-bottom: 12px; }
+    .context-box, .order-box {
+        background: transparent;
+        border: 1px solid var(--border-color-primary, #d1d5db);
+        border-radius: 8px;
+        margin: 8px 0;
+        padding: 16px;
+    }
+    .order-amount { font-size: 1.2em; font-weight: 600; }
+    .decision-message { font-weight: 600; }
     """
     
     with gr.Blocks(
@@ -352,7 +355,7 @@ def create_admin_dashboard():
 <div class="order-box">
 <p style="font-size: 1.1em; font-weight: 600; margin-bottom: 8px;"> 订单信息</p>
 <p><strong>订单号:</strong> {order_data.get('order_sn', '无')}</p>
-<p><strong>订单金额:</strong> <span style="color: #dc3545; font-size: 1.2em; font-weight: bold;">¥{order_data.get('total_amount', 0)}</span></p>
+<p><strong>订单金额:</strong> <span class="order-amount">¥{order_data.get('total_amount', 0)}</span></p>
 <p><strong>订单状态:</strong> {order_data.get('status', '无')}</p>
 <p><strong>商品列表:</strong></p>
 {items_html}
@@ -390,9 +393,9 @@ def create_admin_dashboard():
             result = client.make_decision(audit_log_id, "APPROVE", comment)
             
             if result.get("success"):
-                return f'<p class="decision-success"> 审核通过 - 任务 #{audit_log_id} 已批准</p><p>请点击"刷新"更新任务列表</p>'
+                return f'<p class="decision-message">审核通过 - 任务 #{audit_log_id} 已批准</p><p>请点击"刷新"更新任务列表</p>'
             else: 
-                return f'<p class="decision-error"> 操作失败:  {result.get("message", "未知错误")}</p>'
+                return f'<p class="decision-message">操作失败: {result.get("message", "未知错误")}</p>'
         
         def make_reject_decision(client:  AdminClient, selected_task: Dict, comment: str):
             """拒绝决策"""
@@ -403,15 +406,15 @@ def create_admin_dashboard():
                 return " 请先选择任务"
             
             if not comment.strip():
-                return '<p class="decision-error"> 拒绝时必须填写审核备注</p>'
+                return '<p class="decision-message">拒绝时必须填写审核备注</p>'
             
             audit_log_id = selected_task["audit_log_id"]
             result = client.make_decision(audit_log_id, "REJECT", comment)
             
             if result.get("success"):
-                return f'<p class="decision-success">审核拒绝 - 任务 #{audit_log_id} 已拒绝</p><p>请点击"刷新"更新任务列表</p>'
+                return f'<p class="decision-message">审核拒绝 - 任务 #{audit_log_id} 已拒绝</p><p>请点击"刷新"更新任务列表</p>'
             else:
-                return f'<p class="decision-error">操作失败: {result.get("message", "未知错误")}</p>'
+                return f'<p class="decision-message">操作失败: {result.get("message", "未知错误")}</p>'
         
         # === 事件绑定 ===
         

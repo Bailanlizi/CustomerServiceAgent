@@ -243,12 +243,6 @@ def create_chat_interface():
         gap: 6px;
     }
 
-    /* 状态卡片 */
-    .audit-card { padding: 16px; border-radius: 8px; margin-top: 8px; font-size: 0.9em; border-left: 4px solid transparent; }
-    .audit-card-pending { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
-    .audit-card-approved { background: #f0fdf4; border-color: #22c55e; color: #166534; }
-    .audit-card-rejected { background: #fef2f2; border-color: #ef4444; color: #991b1b; }
-    
     /* 状态栏微调 */
     .status-badge {
         font-size: 0.75rem; 
@@ -257,6 +251,13 @@ def create_chat_interface():
         display: inline-block;
         margin-top: 4px;
     }
+
+    /* 统一对话气泡：机器人消息=深底白字（单一格式），用户消息=靛蓝底白字。
+       彻底移除历史上出现的绿色提示卡片样式，确保所有机器人消息外观一致。 */
+    .message.bot { background: #1f2937 !important; opacity: 1 !important; }
+    .message.bot .message-content { background: #1f2937 !important; color: #f9fafb !important; opacity: 1 !important; }
+    .message.user { background: #4338ca !important; opacity: 1 !important; }
+    .message.user .message-content { background: #4338ca !important; color: #ffffff !important; opacity: 1 !important; }
     """
     
     with gr.Blocks(title="Smart Agent v4.0", theme=theme, css=custom_css) as demo:
@@ -413,24 +414,22 @@ def create_chat_interface():
                 ""
             )
 
-        def render_audit_card_v2(status_info: dict) -> str:
-            """优化的审核卡片渲染"""
+        def audit_status_text(status_info: dict) -> str:
+            """返回审核状态的纯文本，不创建额外 HTML 卡片。"""
             status = status_info.get("status", "UNKNOWN")
             data = status_info.get("data", {})
-            
             if status == "WAITING_ADMIN":
-                return f'''
-                <div class="audit-card audit-card-pending">
-                    <b>⏳ 触发风控审核</b><br>
-                    原因：{data.get("trigger_reason", "未知")}<br>
-                    风险等级：{data.get("risk_level", "NORMAL")}
-                </div>'''
-            elif status == "APPROVED":
-                return '<div class="audit-card audit-card-approved"> <b>审核通过</b><br>退款流程已启动</div>'
-            elif status == "PROCESSING":
-                return '<div class="audit-card audit-card-approved"> <b>退款处理中</b><br>请稍后查询处理结果</div>'
-            elif status == "REJECTED":
-                return f'<div class="audit-card audit-card-rejected"> <b>审核拒绝</b><br>{data.get("admin_comment", "无理由")}</div>'
+                return (
+                    "审核中\n"
+                    f"原因：{data.get('trigger_reason', '未知')}\n"
+                    f"风险等级：{data.get('risk_level', 'NORMAL')}"
+                )
+            if status == "APPROVED":
+                return "审核通过\n退款流程已启动"
+            if status == "PROCESSING":
+                return "退款处理中\n请稍后查询处理结果"
+            if status == "REJECTED":
+                return f"审核拒绝\n{data.get('admin_comment', '无理由')}"
             return ""
 
         def send_and_update_v2(message, history, client):
@@ -455,18 +454,17 @@ def create_chat_interface():
                 yield history, "", '<span class="status-badge" style="background:#fee2e2; color:#b91c1c;">Error</span>', gr.update(visible=False)
                 return
 
-            # 处理回复内容
-            final_content = response
-            status = status_info.get("status", "PROCESSING")
-
-            # 追加漂亮的 HTML 卡片
-            if status in ["WAITING_ADMIN", "APPROVED", "PROCESSING", "REJECTED"]:
-                final_content += render_audit_card_v2(status_info)
+            status = status_info.get("status")
+            # 状态作为普通文本并入同一条机器人消息，使用 Chatbot 默认对话框样式。
+            status_text = audit_status_text(status_info) if status else ""
+            final_content = response.strip()
+            if status_text:
+                final_content = f"{final_content}\n\n{status_text}" if final_content else status_text
 
             history.append({"role": "assistant", "content": final_content})
 
             status_text = "Ready"
-            status_color = "#dcfce7; color:#15803d" # Green
+            status_color = "#e0e7ff; color:#4338ca" # Indigo (neutral, no green)
             if status == "WAITING_ADMIN":
                 status_text = "Waiting Audit"
                 status_color = "#fef3c7; color:#b45309" # Yellow
@@ -495,10 +493,13 @@ def create_chat_interface():
 
             success, response, status_info = client.send_message(message, user_confirmed=True)
 
-            final_content = response if success else f"❌ Error: {response}"
-            status = status_info.get("status", "PROCESSING") if success else "ERROR"
-            if success and status in ["WAITING_ADMIN", "APPROVED", "PROCESSING", "REJECTED"]:
-                final_content += render_audit_card_v2(status_info)
+            if success:
+                status_text = audit_status_text(status_info)
+                final_content = response.strip()
+                if status_text:
+                    final_content = f"{final_content}\n\n{status_text}" if final_content else status_text
+            else:
+                final_content = f"❌ Error: {response}"
             history.append({"role": "assistant", "content": final_content})
 
             # SUBMITTED 之后 stage 通常是 DONE；按钮隐藏
