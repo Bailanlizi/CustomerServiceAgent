@@ -206,6 +206,25 @@ uv run python scripts/run_rag_baseline.py
 uv run python scripts/evaluate_ragas.py
 ```
 
+### 集成测试
+
+项目提供独立的测试编排文件 `docker-compose.test.yml`，包含 PostgreSQL + pgvector、Redis、Celery Worker 和 Celery Beat。首次运行前先准备测试环境变量：
+
+```bash
+copy .env.test.example .env.test
+docker compose -f docker-compose.test.yml up -d db redis celery_worker celery_beat
+```
+
+在宿主机将 `.env` 指向测试数据库（PostgreSQL `localhost:55432`、Redis `localhost:56380`），执行迁移后运行严格集成测试：
+
+```bash
+uv run alembic upgrade head
+$env:RUN_INTEGRATION_TESTS="1"  # PowerShell；Linux/macOS 使用 export
+uv run pytest -m integration -q
+```
+
+未设置 `RUN_INTEGRATION_TESTS=1` 时，集成测试会安全跳过，不会误连开发数据库或真实外部服务。集成测试覆盖认证/会话恢复、SSE API 契约及真实 PostgreSQL 下同订单并发退款只能成功一次。
+
 仓库中保留的历史基线结果显示：`primary_hit@5 = 1.000`、`clause_recall@5 = 0.9815`、`MRR@5 = 0.8685`、RAGAS faithfulness 为 `0.9091`。这些是特定数据与模型配置下的历史结果，不应视为生产环境承诺。
 
 ## 当前边界与后续方向

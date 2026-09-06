@@ -2,15 +2,19 @@
 """
 v2.0 API 完整验收测试
 """
-import requests
 import json
-from app.core.security import create_access_token
 
+import pytest
+import requests
+
+from app.core.security import create_access_token
 
 BASE_URL = "http://localhost:8000"
 API_V1 = f"{BASE_URL}/api/v1"
 
 
+@pytest.mark.integration
+@pytest.mark.legacy_e2e
 def test_api():
     print("=" * 60)
     print("🚀 开始 v2.0 API 验收测试")
@@ -78,7 +82,7 @@ def test_api():
                 print(f"❌ HTTP {response.status_code}: {response.text}")
                 continue
             
-            print(f"\n🤖 Agent 回答:")
+            print("\n🤖 Agent 回答:")
             full_answer = ""
             
             for line in response.iter_lines():
@@ -120,6 +124,7 @@ def test_api():
                 
         except Exception as e: 
             print(f"❌ 测试失败: {e}")
+            raise
     
     print(f"\n{'=' * 60}")
     print("🎉 所有 API 测试完成")

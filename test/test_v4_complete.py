@@ -11,17 +11,19 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from langchain_core.messages import HumanMessage
 
 from app.core.database import init_db
 from app.graph.workflow import compile_app_graph
-from app.core.security import create_access_token
-from app.models.refund import RefundApplication, RefundStatus
-from app.core.database import async_session_maker
-from langchain_core.messages import HumanMessage
-from sqlmodel import select, desc
 
 
+@pytest.mark.integration
+@pytest.mark.legacy_e2e
+@pytest.mark.asyncio
 async def test_v4():
     print("=" * 60)
     print("开始 v4.0 验收测试")
@@ -80,20 +82,22 @@ async def test_v4():
             final_state = await app_graph.ainvoke(initial_state, config)
             
             # 输出结果
-            print(f"\n 结果分析:")
+            print("\n 结果分析:")
             print(f"  意图: {final_state.get('intent', 'N/A')}")
             
-            print(f"\n Agent 回答:")
+            print("\n Agent 回答:")
             print(f"  {final_state.get('answer', 'N/A')}")
             
             assert final_state.get("answer"), "Agent 应返回非空回复"
                 
         except AssertionError as e:
             print(f"\n 测试失败: {e}")
+            raise
         except Exception as e: 
             print(f"\n 测试异常: {e}")
             import traceback
             traceback.print_exc()
+            raise
     
     print(f"\n{'=' * 60}")
     print(" 所有测试完成")

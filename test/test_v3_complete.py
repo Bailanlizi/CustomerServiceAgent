@@ -1,5 +1,5 @@
-# scripts/test_v3_complete.py
 #!/usr/bin/env python3
+# scripts/test_v3_complete.py
 """
 v3.0 完整验收测试
 测试场景:  
@@ -14,12 +14,18 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.core.database import init_db
 from app. graph.workflow import compile_app_graph
 
+from app.core.database import init_db
 
+
+@pytest.mark.integration
+@pytest.mark.legacy_e2e
+@pytest.mark.asyncio
 async def test_v3():
     print("=" * 60)
     print("🚀 开始 v3.0 验收测试")
@@ -96,11 +102,11 @@ async def test_v3():
             final_state = await app_graph.ainvoke(initial_state, config)
             
             # 输出结果
-            print(f"\n📊 结果分析:")
+            print("\n📊 结果分析:")
             print(f"  意图:  {final_state.get('intent', 'N/A')}")
             print(f"  退货流程活跃: {final_state.get('refund_flow_active', False)}")
             
-            print(f"\n🤖 Agent 回答:")
+            print("\n🤖 Agent 回答:")
             print(f"{final_state.get('answer', 'N/A')}")
             
             # 验证逻辑
@@ -129,10 +135,12 @@ async def test_v3():
                 
         except AssertionError as e:
             print(f"\n 测试失败: {e}")
+            raise
         except Exception as e:
             print(f"\n 测试异常: {e}")
             import traceback
             traceback. print_exc()
+            raise
     
     print(f"\n{'=' * 60}")
     print("🎉 所有测试完成")

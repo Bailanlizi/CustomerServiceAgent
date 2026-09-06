@@ -1,0 +1,50 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: customer_service_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d customer_service_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis/redis-stack-server:latest
+    ports:
+      - "56380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  celery_worker:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    env_file:
+      - .env.test.example
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["sh", "-c", "uv sync --group dev && uv run celery -A app.celery_app worker --loglevel=info --pool=solo"]
+
+  celery_beat:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    env_file:
+      - .env.test.example
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["sh", "-c", "uv sync --group dev && uv run celery -A app.celery_app beat --loglevel=info"]
