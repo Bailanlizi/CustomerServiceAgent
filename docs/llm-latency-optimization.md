@@ -125,7 +125,8 @@
 - extractor prompt（308-319 行）：
   - 新增 memory 白名单投影：只传 `active_domain / active_order_sn / conversation_summary / pending_slots` 与 `collected_slots` 的 `order_sn / refund_reason / user_confirmed / refund_submitted_id / user_constraints`；**不传** `last_tool_result / workflow_stage / next_action / active_order_id`。
   - 指令压缩至 ~100 字，枚举值（QUALITY_ISSUE 等 5 类）完整保留。
-  - fast_llm 实例配 `max_tokens=300`。
+  - fast 模型实例配 `max_tokens=900`（仅 extractor）+ `extra_body={"enable_thinking": False}`。
+    - ⚠️ 实施时踩坑更正（原方案写 300）：qwen3.7-flash **默认 thinking 开启**，结构化调用会输出 550-900+ tokens 推理文本，300/900 上限都会截断 JSON → 校验异常 → 静默走关键词兜底（首验 16 runs 中 S03/S07/S08 全挂的根因）。关闭 thinking 后 output 降到 ~111 tokens、单次延迟 3.4s→0.8s。教训：**换快模型必须先单独直连测 structured output 的真实 completion 开销，再定 max_tokens**。
 
 预期：extractor 单次 8-11s → 2-4s；订单查询端到端 8.5s → ~3s；退款每轮省 5-7s。重点观察 S03/S07/S08 槽位抽取正确率。
 
@@ -199,7 +200,7 @@
 |---|---|---|---|---|---|---|
 | 基线 | — | — | agent_e2e_20260907_084355.json | 56/56 | 9617 / 15677 ms | qwen3.7-max；llm_calls=84（stream 7） |
 | 1 | 退款话术模板化 | `--runs 2` | agent_e2e_20260907_105130.json | 16/16 | 9078 / 15854 ms | identify_order 4726/6404ms→1.1/1.4ms；refund_agent p95 5965→225ms；exact_stream 7→0；单测 48 全过；S04 模板断言通过 |
-| 2 | 模型分层 + extractor 裁剪 | `--runs 2` | （待填） | | | |
+| 2 | 模型分层 + extractor 裁剪 | `--runs 2` | agent_e2e_20260907_131155.json | 16/16 | **894 / 15768 ms** | 首验 125919 失败（flash thinking 截断→S03/S07/S08 全挂）→ 关 thinking 修复；completion 总量 11039→3211；prompt 总量 9520→6564；intent_router 不再触发 LLM；p95 仍为政策生成（步骤 3 目标） |
 | 3 | Prompt 清理 + 政策限长 | `--runs 2` | （待填） | | | |
 | 4 | 政策回答分段推送 | `--runs 2` | （待填） | | | |
 | 终验 | P2 全量 | `--runs 7` | （待填） | | | 最终数字沉淀 README |

@@ -33,7 +33,19 @@ llm = ChatOpenAI(
     base_url=settings.OPENAI_BASE_URL,
     api_key=SecretStr(settings.OPENAI_API_KEY),
     model=settings.LLM_MODEL,
-    temperature=0 
+    temperature=0
+)
+
+# 1.1 轻量快模型：用于低风险高频轻任务（意图分类、闲聊兜底）。
+# 政策回答（policy_answer_llm）等安全关键路径仍用主模型 llm。
+# enable_thinking=False：qwen3.7-flash 默认 thinking 输出 550-900+ tokens 推理
+# 文本，关掉后 output 降到 ~111 tokens、延迟 3.4s→0.8s（步骤 2 实测）。
+fast_llm = ChatOpenAI(
+    base_url=settings.OPENAI_BASE_URL,
+    api_key=SecretStr(settings.OPENAI_API_KEY),
+    model=settings.LLM_MODEL_FAST,
+    temperature=0,
+    extra_body={"enable_thinking": False},
 )
 
 # 2. Prompt 模板
@@ -255,7 +267,7 @@ async def generate(state: AgentState) -> dict:
     ]
     
     response = None
-    async for chunk in llm.astream(messages):
+    async for chunk in fast_llm.astream(messages):
         response = chunk if response is None else response + chunk
 
     answer = response.content if response else ""
@@ -290,7 +302,7 @@ class IntentDecision(BaseModel):
     intent: Literal["ORDER", "POLICY", "REFUND", "OTHER"]
 
 
-intent_classifier = llm.with_structured_output(IntentDecision).with_config(
+intent_classifier = fast_llm.with_structured_output(IntentDecision).with_config(
     {"tags": [INTERNAL_LLM_TAG]}
 )
 

@@ -1,0 +1,1152 @@
+{
+  "summary": {
+    "llm_model": "qwen3.7-max",
+    "runs": 2,
+    "normal_success_rate": 0.5714,
+    "indirect_security_signal_rate": 1.0,
+    "security_intercept_rate": null,
+    "tool_metrics": {
+      "selection_precision": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 2
+      },
+      "selection_recall": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "n": 6
+      },
+      "order_accuracy": {
+        "mean": 0.25,
+        "min": 0.0,
+        "max": 1.0,
+        "n": 8
+      },
+      "valid_runs_per_scenario": {
+        "S01": 0,
+        "S02": 2,
+        "S03": 2,
+        "S04": 0,
+        "S07": 2,
+        "S08": 2
+      },
+      "degenerate_runs_per_scenario": {
+        "S01": 2,
+        "S02": 0,
+        "S03": 0,
+        "S04": 2,
+        "S07": 0,
+        "S08": 0
+      }
+    },
+    "per_scenario": {
+      "S01": {
+        "name": "查询我的订单",
+        "user": "alice",
+        "passes": 2,
+        "total": 2,
+        "rate": 1.0
+      },
+      "S02": {
+        "name": "查询指定订单",
+        "user": "alice",
+        "passes": 2,
+        "total": 2,
+        "rate": 1.0
+      },
+      "S03": {
+        "name": "正常退款全流程",
+        "user": "alice",
+        "passes": 0,
+        "total": 2,
+        "rate": 0.0
+      },
+      "S04": {
+        "name": "缺订单号退款",
+        "user": "alice",
+        "passes": 2,
+        "total": 2,
+        "rate": 1.0
+      },
+      "S05": {
+        "name": "政策问答",
+        "user": "alice",
+        "passes": 2,
+        "total": 2,
+        "rate": 1.0
+      },
+      "S06": {
+        "name": "越权退款（跨用户）",
+        "user": "alice",
+        "passes": 2,
+        "total": 2,
+        "rate": 1.0,
+        "assertion_type": "indirect",
+        "assertion_note": "未经过 ToolCapabilityRegistry NOT_AUTHORIZED 路径；测的是 prepare_turn SQL 反查 + identify_order 固定文案"
+      },
+      "S07": {
+        "name": "重登后续退款",
+        "user": "bob",
+        "passes": 0,
+        "total": 2,
+        "rate": 0.0
+      },
+      "S08": {
+        "name": "重复提交退款",
+        "user": "alice",
+        "passes": 0,
+        "total": 2,
+        "rate": 0.0
+      }
+    },
+    "trace": {
+      "node_latency": {
+        "collect_reason": {
+          "count": 6,
+          "p50_ms": 0.8,
+          "p95_ms": 1.4
+        },
+        "compose_answer": {
+          "count": 4,
+          "p50_ms": 0.6,
+          "p95_ms": 0.6
+        },
+        "dispatch_router": {
+          "count": 20,
+          "p50_ms": 0.7,
+          "p95_ms": 1.3
+        },
+        "entry": {
+          "count": 12,
+          "p50_ms": 2.0,
+          "p95_ms": 4.2
+        },
+        "generate": {
+          "count": 4,
+          "p50_ms": 9401.7,
+          "p95_ms": 9497.9
+        },
+        "identify_order": {
+          "count": 6,
+          "p50_ms": 0.7,
+          "p95_ms": 1.1
+        },
+        "intent_router": {
+          "count": 14,
+          "p50_ms": 2670.8,
+          "p95_ms": 4111.3
+        },
+        "order_workflow": {
+          "count": 4,
+          "p50_ms": 17.2,
+          "p95_ms": 26.3
+        },
+        "query_order": {
+          "count": 4,
+          "p50_ms": 5.2,
+          "p95_ms": 7.8
+        },
+        "refund_agent": {
+          "count": 12,
+          "p50_ms": 16.9,
+          "p95_ms": 26.3
+        },
+        "route_from_entry": {
+          "count": 12,
+          "p50_ms": 1.1,
+          "p95_ms": 1.7
+        },
+        "route_intent": {
+          "count": 14,
+          "p50_ms": 0.5,
+          "p95_ms": 0.7
+        }
+      },
+      "llm_only_latency": {
+        "count": 18,
+        "p50_ms": 2703.1,
+        "p95_ms": 9497.5
+      },
+      "llm_calls": 18,
+      "total_prompt_tokens": 3692,
+      "total_completion_tokens": 7467,
+      "token_source_counts": {
+        "exact_invoke": 14,
+        "exact_stream": 4,
+        "unknown": 0
+      }
+    }
+  },
+  "runs": {
+    "S01": [
+      {
+        "passed": true,
+        "detail": "回答含本人订单",
+        "tool_names": [
+          "query_order_tool"
+        ],
+        "tool_codes": [
+          "SUCCESS"
+        ],
+        "answer": "【订单详情】\n- 订单号: SN20240003\n- 当前状态: SHIPPED\n- 订单金额: 199.00 元\n- 收货地址/物流: SF987654321\n- 商品明细: 运动T恤(x1), 运动短裤(x1)",
+        "turns": [
+          {
+            "question": "查我的订单",
+            "conversation_id": "88c8fd9c-8f2c-4f50-9c1d-54d67b2955b7",
+            "tool_calls": [
+              {
+                "name": "query_order_tool",
+                "arguments": {
+                  "question": "查我的订单"
+                },
+                "user_id": 1,
+                "code": "SUCCESS",
+                "ok": true,
+                "duration_ms": 7.4
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "order_workflow",
+                "duration_ms": 26.3
+              },
+              {
+                "name": "query_order",
+                "duration_ms": 7.8
+              },
+              {
+                "name": "compose_answer",
+                "duration_ms": 0.6
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      },
+      {
+        "passed": true,
+        "detail": "回答含本人订单",
+        "tool_names": [
+          "query_order_tool"
+        ],
+        "tool_codes": [
+          "SUCCESS"
+        ],
+        "answer": "【订单详情】\n- 订单号: SN20240003\n- 当前状态: SHIPPED\n- 订单金额: 199.00 元\n- 收货地址/物流: SF987654321\n- 商品明细: 运动T恤(x1), 运动短裤(x1)",
+        "turns": [
+          {
+            "question": "查我的订单",
+            "conversation_id": "01006eb5-b7b5-4131-9c73-c60d67affc51",
+            "tool_calls": [
+              {
+                "name": "query_order_tool",
+                "arguments": {
+                  "question": "查我的订单"
+                },
+                "user_id": 1,
+                "code": "SUCCESS",
+                "ok": true,
+                "duration_ms": 4.8
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.9
+              },
+              {
+                "name": "order_workflow",
+                "duration_ms": 16.0
+              },
+              {
+                "name": "query_order",
+                "duration_ms": 5.2
+              },
+              {
+                "name": "compose_answer",
+                "duration_ms": 0.6
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      }
+    ],
+    "S02": [
+      {
+        "passed": true,
+        "detail": "回答含 SN20240001",
+        "tool_names": [
+          "query_order_tool"
+        ],
+        "tool_codes": [
+          "SUCCESS"
+        ],
+        "answer": "【订单详情】\n- 订单号: SN20240001\n- 当前状态: SHIPPED\n- 订单金额: 128.50 元\n- 收货地址/物流: SF123456789\n- 商品明细: 运动内衣(x1)",
+        "turns": [
+          {
+            "question": "SN20240001 是什么情况",
+            "conversation_id": "17dad629-a23d-46cb-9802-f9129d40b674",
+            "tool_calls": [
+              {
+                "name": "query_order_tool",
+                "arguments": {
+                  "question": "SN20240001 是什么情况"
+                },
+                "user_id": 1,
+                "code": "SUCCESS",
+                "ok": true,
+                "duration_ms": 4.7
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 1.0
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 1700.5
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "order_workflow",
+                "duration_ms": 17.2
+              },
+              {
+                "name": "query_order",
+                "duration_ms": 5.1
+              },
+              {
+                "name": "compose_answer",
+                "duration_ms": 0.3
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 229,
+                "completion_tokens": 308,
+                "duration_ms": 1695.3,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "passed": true,
+        "detail": "回答含 SN20240001",
+        "tool_names": [
+          "query_order_tool"
+        ],
+        "tool_codes": [
+          "SUCCESS"
+        ],
+        "answer": "【订单详情】\n- 订单号: SN20240001\n- 当前状态: SHIPPED\n- 订单金额: 128.50 元\n- 收货地址/物流: SF123456789\n- 商品明细: 运动内衣(x1)",
+        "turns": [
+          {
+            "question": "SN20240001 是什么情况",
+            "conversation_id": "9b4c7bb4-7c2d-459b-86e7-e2c8c14afd78",
+            "tool_calls": [
+              {
+                "name": "query_order_tool",
+                "arguments": {
+                  "question": "SN20240001 是什么情况"
+                },
+                "user_id": 1,
+                "code": "SUCCESS",
+                "ok": true,
+                "duration_ms": 3.9
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 1828.8
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "order_workflow",
+                "duration_ms": 15.4
+              },
+              {
+                "name": "query_order",
+                "duration_ms": 4.3
+              },
+              {
+                "name": "compose_answer",
+                "duration_ms": 0.4
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 229,
+                "completion_tokens": 301,
+                "duration_ms": 1824.4,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "S03": [
+      {
+        "passed": false,
+        "detail": "SN20240003 退款申请 status=None（期望 PENDING）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好！目前系统暂未查询到与您相关的记录。为了准确帮您处理“确认提交”的操作，请您补充提供具体的**订单号**、**申请类型**或**其他相关详情**。收到信息后，我将第一时间为您核实并跟进后续流程。感谢您的配合与支持！",
+        "turns": [
+          {
+            "question": "我要退 SN20240003，质量有问题",
+            "conversation_id": "dcbef233-6b3e-4550-8390-1ec12209a0c9",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.8
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 2686.2
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 26.3
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.0
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.2
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 0.5
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 295,
+                "duration_ms": 2682.8,
+                "token_source": "exact_invoke"
+              }
+            ]
+          },
+          {
+            "question": "确认提交",
+            "conversation_id": "dcbef233-6b3e-4550-8390-1ec12209a0c9",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 2643.1
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.3
+              },
+              {
+                "name": "generate",
+                "duration_ms": 2703.8
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 219,
+                "completion_tokens": 275,
+                "duration_ms": 2638.1,
+                "token_source": "exact_invoke"
+              },
+              {
+                "kind": "astream",
+                "prompt_tokens": 129,
+                "completion_tokens": 490,
+                "duration_ms": 2703.1,
+                "token_source": "exact_stream"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "passed": false,
+        "detail": "SN20240003 退款申请 status=None（期望 PENDING）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好！目前我这边暂时没有查询到相关的记录。为了更准确地为您处理，请您提供一下具体的**订单号**、商品名称或其他相关细节，我会立即为您核实并跟进。感谢您的理解与支持！",
+        "turns": [
+          {
+            "question": "我要退 SN20240003，质量有问题",
+            "conversation_id": "eb991bb4-c10e-419d-a397-3c0be6543a84",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 3229.1
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.3
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 17.2
+              },
+              {
+                "name": "entry",
+                "duration_ms": 1.0
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 1.4
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 304,
+                "duration_ms": 3226.6,
+                "token_source": "exact_invoke"
+              }
+            ]
+          },
+          {
+            "question": "确认提交",
+            "conversation_id": "eb991bb4-c10e-419d-a397-3c0be6543a84",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.7
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 3330.3
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.7
+              },
+              {
+                "name": "generate",
+                "duration_ms": 9497.9
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 219,
+                "completion_tokens": 261,
+                "duration_ms": 3326.1,
+                "token_source": "exact_invoke"
+              },
+              {
+                "kind": "astream",
+                "prompt_tokens": 129,
+                "completion_tokens": 929,
+                "duration_ms": 9497.5,
+                "token_source": "exact_stream"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "S04": [
+      {
+        "passed": true,
+        "detail": "反问要订单号：您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "turns": [
+          {
+            "question": "我要退款",
+            "conversation_id": "dfb41956-04e6-485a-a72c-4731162b420c",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 17.1
+              },
+              {
+                "name": "entry",
+                "duration_ms": 1.3
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 1.1
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      },
+      {
+        "passed": true,
+        "detail": "反问要订单号：您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "turns": [
+          {
+            "question": "我要退款",
+            "conversation_id": "a048a55a-567f-41fa-a737-8edcfb5395f4",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 16.9
+              },
+              {
+                "name": "entry",
+                "duration_ms": 1.6
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 1.0
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      }
+    ],
+    "S05": [
+      {
+        "passed": true,
+        "detail": "生成了政策回答：您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "turns": [
+          {
+            "question": "运动内衣试穿后还能退货吗",
+            "conversation_id": "45fa77c0-4598-4844-8988-86c8a0bb75cb",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 15.3
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.4
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.5
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 0.5
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      },
+      {
+        "passed": true,
+        "detail": "生成了政策回答：您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。",
+        "turns": [
+          {
+            "question": "运动内衣试穿后还能退货吗",
+            "conversation_id": "1a56e92e-c66d-4d12-8fe3-b17f1a4140fa",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 15.1
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.3
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.4
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 0.5
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      }
+    ],
+    "S06": [
+      {
+        "passed": true,
+        "detail": "拒绝越权（无新增申请）：❌ 未查询到订单 SN20240005，或该订单不在您的账户名下。请核对订单号后重新提供。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "❌ 未查询到订单 SN20240005，或该订单不在您的账户名下。请核对订单号后重新提供。",
+        "turns": [
+          {
+            "question": "我要退 SN20240005",
+            "conversation_id": "619394c1-8387-4911-88fe-645ef9bd7c3f",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 3475.4
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 16.0
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.5
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.7
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 0.5
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 228,
+                "completion_tokens": 288,
+                "duration_ms": 3469.8,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "passed": true,
+        "detail": "拒绝越权（无新增申请）：❌ 未查询到订单 SN20240005，或该订单不在您的账户名下。请核对订单号后重新提供。",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "❌ 未查询到订单 SN20240005，或该订单不在您的账户名下。请核对订单号后重新提供。",
+        "turns": [
+          {
+            "question": "我要退 SN20240005",
+            "conversation_id": "3e41dea2-ef58-477a-9b52-a00b38c96b56",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.3
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 2011.2
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 15.1
+              },
+              {
+                "name": "entry",
+                "duration_ms": 1.5
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "identify_order",
+                "duration_ms": 0.7
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 228,
+                "completion_tokens": 290,
+                "duration_ms": 2007.3,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "S07": [
+      {
+        "passed": false,
+        "detail": "SN20240004 退款申请 status=None（期望 PENDING）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好！目前暂未查询到相关参考信息。为了准确为您处理“确认提交”的请求，请您提供具体的订单号或其他详细信息（如商品名称、提交的具体事项等）。收到后我将立即为您核实并协助办理。感谢您的支持与配合！",
+        "turns": [
+          {
+            "question": "我要退 SN20240004，尺码不合适",
+            "conversation_id": "701db3a0-f688-4bee-8c7c-e80580c22797",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 1.0
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 4111.3
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.3
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 16.3
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.2
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.5
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 0.8
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 305,
+                "duration_ms": 4106.7,
+                "token_source": "exact_invoke"
+              }
+            ]
+          },
+          {
+            "question": "确认提交",
+            "conversation_id": "701db3a0-f688-4bee-8c7c-e80580c22797",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 1.3
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 1888.6
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "generate",
+                "duration_ms": 5267.9
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 219,
+                "completion_tokens": 209,
+                "duration_ms": 1882.9,
+                "token_source": "exact_invoke"
+              },
+              {
+                "kind": "astream",
+                "prompt_tokens": 129,
+                "completion_tokens": 1127,
+                "duration_ms": 5267.5,
+                "token_source": "exact_stream"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "passed": false,
+        "detail": "SN20240004 退款申请 status=None（期望 PENDING）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "您好！目前我这边暂时没有查询到相关的参考信息。为了更准确地帮您处理“确认提交”的操作，请您提供一下具体的订单号、申请编号或其他相关细节，我会立即为您核实并协助完成后续流程。感谢您的支持与配合！",
+        "turns": [
+          {
+            "question": "我要退 SN20240004，尺码不合适",
+            "conversation_id": "830039f6-a764-4da2-93f9-273f72a25764",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.9
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 1630.8
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 20.4
+              },
+              {
+                "name": "entry",
+                "duration_ms": 4.2
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.0
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 0.7
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 311,
+                "duration_ms": 1627.0,
+                "token_source": "exact_invoke"
+              }
+            ]
+          },
+          {
+            "question": "确认提交",
+            "conversation_id": "830039f6-a764-4da2-93f9-273f72a25764",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.7
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 1336.3
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "generate",
+                "duration_ms": 9401.7
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 219,
+                "completion_tokens": 207,
+                "duration_ms": 1332.4,
+                "token_source": "exact_invoke"
+              },
+              {
+                "kind": "astream",
+                "prompt_tokens": 129,
+                "completion_tokens": 949,
+                "duration_ms": 9401.3,
+                "token_source": "exact_stream"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "S08": [
+      {
+        "passed": false,
+        "detail": "SN20240003 退款申请数=0（期望 1）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "请说明退货原因（如：质量问题、尺码不合适、不想要了）。",
+        "turns": [
+          {
+            "question": "我要退 SN20240003，质量有问题",
+            "conversation_id": "199bcf64-ffb6-467f-b28b-732f14afc8a4",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.7
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 2813.1
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 17.6
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.0
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 1.1
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 0.7
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 308,
+                "duration_ms": 2808.9,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "passed": false,
+        "detail": "SN20240003 退款申请数=0（期望 1）",
+        "tool_names": [],
+        "tool_codes": [],
+        "answer": "请说明退货原因（如：质量问题、尺码不合适、不想要了）。",
+        "turns": [
+          {
+            "question": "我要退 SN20240003，质量有问题",
+            "conversation_id": "64bd3ecd-d19d-4288-abce-99895a7132b7",
+            "tool_calls": [],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.7
+              },
+              {
+                "name": "intent_router",
+                "duration_ms": 2670.8
+              },
+              {
+                "name": "route_intent",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 15.8
+              },
+              {
+                "name": "entry",
+                "duration_ms": 1.0
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "collect_reason",
+                "duration_ms": 1.0
+              }
+            ],
+            "llm_calls": [
+              {
+                "kind": "ainvoke",
+                "prompt_tokens": 231,
+                "completion_tokens": 310,
+                "duration_ms": 2667.8,
+                "token_source": "exact_invoke"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

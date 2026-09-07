@@ -136,7 +136,8 @@ def test_select_refund_context_starts_at_human_message():
 @pytest.mark.asyncio
 async def test_generate_writes_ai_message_back_to_history(monkeypatch):
     stub = StubLLM("订单已发货。")
-    monkeypatch.setattr(nodes, "llm", stub)
+    # P0 模型分层：通用 generate 兜底路径已切换到 fast_llm
+    monkeypatch.setattr(nodes, "fast_llm", stub)
 
     result = await nodes.generate({
         "question": "我的订单到哪了？",

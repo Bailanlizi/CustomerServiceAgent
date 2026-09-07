@@ -104,14 +104,26 @@ class ConversationStateManager:
     """Creates/restores sessions and safely merges persistent working memory."""
 
     def __init__(self, extractor=None, summarizer=None):
-        base_llm = ChatOpenAI(
-            base_url=settings.OPENAI_BASE_URL,
-            api_key=SecretStr(settings.OPENAI_API_KEY),
-            model=settings.LLM_MODEL,
-            temperature=0,
-        )
-        self.extractor = extractor or base_llm.with_structured_output(SlotExtraction)
-        self.summarizer = summarizer or base_llm.with_structured_output(ConversationSummary)
+        # 高频轻任务（槽位抽取/会话压缩）使用快模型；extractor 失败时有关键词
+        # 确定性兜底，summarizer 仅在 ≥6 轮会话触发（e2e 不覆盖，靠单测验证）。
+        # 两个关键参数（步骤 2 首验踩坑结论）：
+        # 1. enable_thinking=False——qwen3.7-flash 默认 thinking 会输出 550-900+
+        #    tokens 推理文本，既拖慢 4 倍延迟，又会顶掉结构化输出的 JSON（实测关
+        #    闭后 output 从 ~550 降到 ~111 tokens，延迟 3.4s→0.8s）。
+        # 2. max_tokens=900 仅加在 extractor 上，防 JSON 被截断（thinking 关闭后
+        #    实际输出 ~111 tokens，余量充足）。
+        def _fast(max_tokens: int | None = None) -> ChatOpenAI:
+            return ChatOpenAI(
+                base_url=settings.OPENAI_BASE_URL,
+                api_key=SecretStr(settings.OPENAI_API_KEY),
+                model=settings.LLM_MODEL_FAST,
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"enable_thinking": False},
+            )
+
+        self.extractor = extractor or _fast(max_tokens=900).with_structured_output(SlotExtraction)
+        self.summarizer = summarizer or _fast().with_structured_output(ConversationSummary)
 
     async def resolve_session(
         self,
@@ -306,15 +318,34 @@ class ConversationStateManager:
             await db.commit()
 
     async def _extract(self, question: str, memory: dict[str, Any]) -> SlotExtraction:
+        # 记忆白名单投影：抽取只需要与任务延续相关的轻量上下文。
+        # last_tool_result（含 tool_outcome 十余项元数据）、workflow_stage、
+        # next_action、active_order_id 等大对象不注入，避免第二轮起 prompt
+        # 从 ~240 涨到 ~730 tokens。
+        slots = memory.get("collected_slots") or {}
+        memory_view = {
+            "active_domain": memory.get("active_domain"),
+            "active_order_sn": memory.get("active_order_sn"),
+            "conversation_summary": memory.get("conversation_summary"),
+            "pending_slots": memory.get("pending_slots"),
+            "collected_slots": {
+                key: slots[key]
+                for key in (
+                    "order_sn", "refund_reason", "user_confirmed",
+                    "refund_submitted_id", "user_constraints",
+                )
+                if key in slots
+            },
+        }
         prompt = (
-            "从用户最新一句话提取客服流程信息。domain 只能是 ORDER/POLICY/REFUND/OTHER；"
-            "只有用户清楚提出不同任务（如'我要退款''换个问题''我先问下运费'）时 explicit_new_goal 才为 true；"
-            "退款原因必须是用户明确表达的原因，不得推测。"
-            "若用户在退款语境下表达退款原因，必须同时给出 refund_reason_category，"
-            "可选值严格为 QUALITY_ISSUE(质量问题) / SIZE_NOT_FIT(尺码不合适) / "
-            "NOT_AS_DESCRIBED(与描述不符) / CHANGED_MIND(不想要了) / OTHER(其他)，"
-            "不得使用其他字面量；判断不了分类时填 OTHER。\n"
-            "当前记忆：" + json.dumps(memory, ensure_ascii=False, default=str)
+            "从用户最新一句话提取客服流程信息。"
+            "domain ∈ ORDER(查订单/物流)/POLICY(政策咨询)/REFUND(退换货退款)/OTHER(闲聊或其他)；"
+            "仅当用户明确提出不同任务（如'我要退款''换个问题''先问下运费'）时 explicit_new_goal=true；"
+            "refund_reason 只填用户明确表达的原因，不得推测；"
+            "若有退款原因必须同时给 refund_reason_category，"
+            "仅可选 QUALITY_ISSUE(质量)/SIZE_NOT_FIT(尺码)/NOT_AS_DESCRIBED(描述不符)/"
+            "CHANGED_MIND(不想要)/OTHER(其他)，判断不了填 OTHER。"
+            "当前记忆：" + json.dumps(memory_view, ensure_ascii=False, default=str)
             + "\n最新输入：" + question
         )
         try:

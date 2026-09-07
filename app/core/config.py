@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str
     OPENAI_API_KEY: str
     LLM_MODEL: str = "qwen-plus"
+    # 轻量快模型：用于低风险高频轻任务（槽位抽取、意图分类、闲聊兜底、会话压缩）。
+    # 政策回答等安全关键路径仍用 LLM_MODEL。回退时把该项设为主模型即可整体回退。
+    LLM_MODEL_FAST: str = "qwen3.7-flash"
     EMBEDDING_MODEL: str = "text-embedding-v3"
     EMBEDDING_DIM: int = 1024
     # 离线评估 judge。必须显式配置为不同于业务生成模型的模型。
