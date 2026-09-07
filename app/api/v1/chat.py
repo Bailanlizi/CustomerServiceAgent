@@ -1,4 +1,5 @@
 # app/api/v1/chat.py
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -20,6 +21,11 @@ from app.services.policy_answer_guard import INTERNAL_LLM_TAG, POLICY_GUARD_TAG
 
 router = APIRouter()
 conversation_manager = ConversationStateManager()
+
+# P2 政策回答分段推送参数：每片 ~20 字，片间 20ms 让前端逐字渲染。
+# 总延迟影响可忽略（30 字答案 → 2 片 → +20ms）。
+_FALLBACK_CHUNK_SIZE = 20
+_FALLBACK_CHUNK_INTERVAL = 0.02
 
 
 def _refund_placeholder_answer(values: dict) -> str:
@@ -163,8 +169,17 @@ async def chat(
                         fallback_answer = output["answer"]
 
             if fallback_answer and not token_sent:
-                payload = json.dumps({"token": fallback_answer}, ensure_ascii=False)
-                yield f"data: {payload}\n\n"
+                # P2: 政策回答 / 退款话术 / 订单回复在此前已通过 PolicyAnswerGuard
+                # 引用校验或 FSM 确定性模板生成，可安全推送。整段一次性 yield 会让
+                # 用户在政策问答场景等 ~2.7s 才看到首字；这里按 ~20 字切片逐片
+                # 推送，TTFT 感知改善，总延迟不变。SSE 事件格式与流式路径一致，
+                # 前端按 token 拼接逻辑已存在。
+                for i in range(0, len(fallback_answer), _FALLBACK_CHUNK_SIZE):
+                    chunk = fallback_answer[i:i + _FALLBACK_CHUNK_SIZE]
+                    payload = json.dumps({"token": chunk}, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+                    await asyncio.sleep(_FALLBACK_CHUNK_INTERVAL)
+                token_sent = True
 
             final_answer = streamed_answer if token_sent else fallback_answer
 

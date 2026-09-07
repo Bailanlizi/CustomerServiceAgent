@@ -24,6 +24,17 @@ async def _sse_body(response) -> str:
     return "".join(chunks)
 
 
+def _extract_token_stream(body: str) -> str:
+    """把所有 data: {"token": "..."} 事件拼接成完整字符串。
+
+    P2 起 fallback_answer 按切片推送，单测不能再断言整段一次性 token 事件；
+    改为校验所有 token 事件拼接后等于完整答案。
+    """
+    import re
+    parts = re.findall(r'data: (\{"token": ".*?"\})', body)
+    return "".join(json.loads(p)["token"] for p in parts)
+
+
 @pytest.mark.asyncio
 async def test_policy_sse_sends_verified_chain_output_after_generation(monkeypatch):
     fake_graph = FakeGraph([
@@ -40,7 +51,7 @@ async def test_policy_sse_sends_verified_chain_output_after_generation(monkeypat
 
     assert '"type": "session"' in body
     assert '"client_session_id": "default_thread"' in body
-    assert f'data: {json.dumps({"token": "这是已完成引用校验的政策答复。"}, ensure_ascii=False)}' in body
+    assert _extract_token_stream(body) == "这是已完成引用校验的政策答复。"
     assert body.endswith("data: [DONE]\n\n")
 
 
@@ -95,6 +106,6 @@ async def test_policy_guard_tagged_stream_tokens_are_never_forwarded(monkeypatch
     # JSON 片段不得出现在 SSE 输出中
     assert "applied_clause_ids" not in body
     assert '{"answer"' not in body
-    # 最终只下发校验通过的完整答案
-    assert f'data: {json.dumps({"token": "这是已完成引用校验的政策答复。"}, ensure_ascii=False)}' in body
+    # 最终只下发校验通过的完整答案（P2 起按切片推送，校验拼接结果）
+    assert _extract_token_stream(body) == "这是已完成引用校验的政策答复。"
     assert body.endswith("data: [DONE]\n\n")
