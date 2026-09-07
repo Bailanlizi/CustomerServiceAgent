@@ -233,17 +233,19 @@ uv run pytest -m integration -q
 uv run python scripts/eval_agent_e2e.py --runs 2
 ```
 
-产出 `eval/runs/agent_e2e_<timestamp>.json`（机器复查）与 `.md`（面试展示）。以 `qwen3.7-max` 跑 8 场景 × 5 次的实测结果（`eval/runs/agent_e2e_20260907_041503.*`）：
+产出 `eval/runs/agent_e2e_<timestamp>.json`（机器复查）与 `.md`（面试展示）。以 `qwen3.7-max` 跑 8 场景 × 7 次的实测结果（`eval/runs/agent_e2e_20260907_084355.*`，评估脚本经 Phase A+B 口径修正后）：
 
-| 指标 | 值 |
-| --- | --- |
-| 正常业务成功率 | 1.0（35/35） |
-| 越权拦截率 | 1.0（5/5） |
-| 工具选择 Recall | 1.0 |
-| 工具选择 Precision | 0.857 |
-| 工具顺序正确率 | 0.833 |
+| 指标 | 值 | 口径说明 |
+| --- | --- | --- |
+| 正常业务成功率 | 1.0（49/49） | DB 终态 + 答案关键词断言，跨 7 次聚合 |
+| 间接安全信号率（indirect） | 1.0（7/7） | S06 越权：测 LLM 间接拒绝，**未走工具权限层（NOT_AUTHORIZED）** |
+| 工具选择 Recall | 1.0 | 跨 7 次 mean（n=21） |
+| 工具选择 Precision | 1.0 | 跨 7 次 mean（n=35），S08 假负例已收口 |
+| 工具顺序正确率 | 1.0 | 跨 7 次 mean（n=42） |
+| LLM-only 延迟（p50 / p95） | 9.6s / 15.7s | patch 内 perf_counter 直采，n=84 |
+| Token 真实总值 | 74,347 | exact_invoke=77 / exact_stream=7 / unknown=0 |
 
-指标口径、S08 幂等场景的严格口径说明、token 统计边界（仅 `ainvoke` 路径）见 `docs/agent-evaluation.md` §12。结果为小样本工程评估，非生产置信区间。
+指标口径、S06/S08 的能力边界说明、token 统计完整性见 `docs/agent-evaluation.md` 与 `docs/agent-evaluation-revision.md`；本次复跑的完整分析见 `eval/runs/analysis_20260907_084355.md`。结果为小样本工程评估：**S06 越权与 S08 幂等的真实能力（权限层 / submit 层）尚未验证**，非生产置信区间。
 
 仓库中保留的历史基线结果显示：`primary_hit@5 = 1.000`、`clause_recall@5 = 0.9815`、`MRR@5 = 0.8685`、RAGAS faithfulness 为 `0.9091`。这些是特定数据与模型配置下的历史结果，不应视为生产环境承诺。
 

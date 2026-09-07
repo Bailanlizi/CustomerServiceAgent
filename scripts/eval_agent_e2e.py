@@ -97,19 +97,47 @@ def install_token_callback() -> None:
     orig_astream = ChatOpenAI.astream
 
     async def _ainvoke(self, *args, **kwargs):
+        t0 = time.perf_counter()
         resp = await orig_ainvoke(self, *args, **kwargs)
+        dur_ms = round((time.perf_counter() - t0) * 1000, 1)
         usage = getattr(resp, "usage_metadata", None) or {}
         _llm_token_store.append({
             "kind": "ainvoke",
             "prompt_tokens": usage.get("input_tokens"),
             "completion_tokens": usage.get("output_tokens"),
+            "duration_ms": dur_ms,
+            "token_source": "exact_invoke",
         })
         return resp
 
     async def _astream(self, *args, **kwargs):
-        _llm_token_store.append({"kind": "astream", "prompt_tokens": None, "completion_tokens": None})
+        # 流式调用：在末 chunk 合并 usage_metadata；非末 chunk 不带 usage
+        t0 = time.perf_counter()
+        usage_collected = None
         async for chunk in orig_astream(self, *args, **kwargs):
+            # 流式协议下 usage_metadata 通常出现在最后一个 chunk（若 provider 支持）
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage:
+                usage_collected = chunk_usage
             yield chunk
+        dur_ms = round((time.perf_counter() - t0) * 1000, 1)
+        if usage_collected:
+            _llm_token_store.append({
+                "kind": "astream",
+                "prompt_tokens": usage_collected.get("input_tokens"),
+                "completion_tokens": usage_collected.get("output_tokens"),
+                "duration_ms": dur_ms,
+                "token_source": "exact_stream",
+            })
+        else:
+            # provider 未在流中返回 usage（罕见）—— 标 unknown，下游单独计数
+            _llm_token_store.append({
+                "kind": "astream",
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "duration_ms": dur_ms,
+                "token_source": "unknown",
+            })
 
     ChatOpenAI.ainvoke = _ainvoke  # type: ignore[method-assign]
     ChatOpenAI.astream = _astream  # type: ignore[method-assign]
@@ -215,6 +243,10 @@ class Scenario:
     assert_fn: Callable[[list[TurnResult]], Awaitable[tuple[bool, str]]]
     # 每次 run 前需清理退款申请的订单号（None 表示不清理，S08 依赖 S03 建的申请）
     cleanup_order_sn: Optional[str] = None
+    # 断言口径：strict = 经过工具层 code 路径；indirect = 仅凭 DB/答案关键词，
+    # 未经过 ToolCapabilityRegistry 的 NOT_AUTHORIZED 等 code 路径
+    assertion_type: str = "strict"
+    assertion_note: Optional[str] = None
 
 
 # ==========================================================
@@ -257,8 +289,15 @@ async def run_turn(
     _tool_calls.clear()
     trace: dict[str, Any] = {"nodes": [], "llm_calls": []}
     node_start: dict[str, float] = {}
-    # LangGraph 内部包装节点，非业务节点，从 Trace 中剔除
-    _INTERNAL_NODES = {"__start__", "__end__", "LangGraph"}
+    # LangGraph/LangChain 内部包装节点，非业务语义节点，从 Trace 中剔除
+    # 避免 RunnableSequence（外层）与内部业务节点（如 generate）对同一次 LLM call 双计
+    _INTERNAL_NODES = {
+        "__start__", "__end__", "LangGraph",
+        "RunnableSequence", "RunnableLambda", "RunnableParallel",
+        "RunnablePassthrough", "RunnableMap", "RunnableBranch",
+        "RunnableWithMessageHistory", "RunnableBinding", "RunnableBinding",
+        "RunnableAssign", "RunnableWithFallbacks",
+    }
 
     async for event in wf.app_graph.astream_events(initial_state, config, version="v2"):
         kind = event["event"]
@@ -472,6 +511,11 @@ SCENARIOS: list[Scenario] = [
         has_tools=True,
         assert_fn=_assert_unauthorized,
         cleanup_order_sn="SN20240005",
+        # 诚实标注：当前越权拒绝走 prepare_turn SQL 反查 + identify_order 节点固定文案
+        # （refund.py:138-143），不经 ToolCapabilityRegistry 的 NOT_AUTHORIZED code 路径。
+        # 要升级为 strict 断言需 D1 业务改造（让 identify_order 调 query_order_tool 触发 code）。
+        assertion_type="indirect",
+        assertion_note="未经过 ToolCapabilityRegistry NOT_AUTHORIZED 路径；测的是 prepare_turn SQL 反查 + identify_order 固定文案",
     ),
     Scenario(
         id="S07", name="重登后续退款", user=BOB,
@@ -490,7 +534,9 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         id="S08", name="重复提交退款", user=ALICE,
         turns=[Turn("我要退 SN20240003，质量有问题")],
-        allowed_chains=[],
+        # 已有申请时 agent 先调 eligibility 查询是合理前置（资格层会返回 REJECTED），
+        # 不应判"多余"；幂等真正要测的是 DB 不新增第二条（见 _assert_idempotent）
+        allowed_chains=[[TOOL_CHECK_ELIGIBILITY]],
         has_tools=True,
         assert_fn=_assert_idempotent,
     ),
@@ -512,40 +558,115 @@ def _tool_scenarios() -> list[Scenario]:
     return [s for s in SCENARIOS if s.has_tools and s.id != "S06"]
 
 
-def compute_tool_metrics(results_by_id: dict[str, dict]) -> dict:
-    """工具选择 Precision/Recall/顺序 + 参数准确率。"""
-    sel_prec_n = sel_prec_d = sel_rec_n = sel_rec_d = order_n = order_d = 0
+def _is_degenerate_run(run: dict, sc: Scenario) -> bool:
+    """判断是否为退化 run：LLM 调用次数过少或 turns 不完整。
+
+    调试用 run（仅触达 prepare_turn、llm_calls=0）不算入工具指标，避免污染聚合。
+    阈值 1：最小场景 S01 单轮也只 1 次 LLM 调用；llm_calls=0 说明没真正进 graph
+    （被中断或仅触达 prepare_turn 的 extractor）。
+    """
+    if run.get("error_trace"):
+        return True
+    turns = run.get("turns") or []
+    if len(turns) != len(sc.turns):
+        return True
+    llm_n = sum(len(t.get("llm_calls", [])) for t in turns)
+    return llm_n < 1
+
+
+def _compute_tool_metrics_single(run: dict, sc: Scenario) -> tuple[float, float, float]:
+    """对单次 run 计算 (precision, recall, order_accuracy)。
+
+    返回 None 表示该 run 在该场景下分母为 0（如 allowed_chains=[] 且无调用），
+    由调用方决定是否计入聚合。
+    """
+    actual = run.get("tool_names", [])
+    # Recall：期望工具（allowed_chains 并集）实际调了几个
+    expected = set()
+    for chain in sc.allowed_chains:
+        expected |= set(chain)
+    expected = expected - {TOOL_QUERY_ORDER}  # query_order_tool 为可选前置
+    rec_d = len(expected)
+    rec_n = len(expected & set(actual))
+    # Precision：调用了多少「不在任何允许链」里的工具
+    allowed_all = set()
+    for chain in sc.allowed_chains:
+        allowed_all |= set(chain)
+    extra = [t for t in actual if t not in allowed_all]
+    prec_d = len(actual)
+    prec_n = len(actual) - len(extra)
+    # 顺序：实际序列是否命中允许链
+    order_ok = False
+    order_valid = True  # 是否可计算（不计算 allowed_chains=[] 且 actual 非空这种异常情况）
+    if sc.allowed_chains:
+        order_ok = _chain_hit(actual, sc.allowed_chains)
+    elif actual:
+        # 不应调工具却调了 → order=0（异常路径）
+        order_ok = False
+    # else: allowed_chains=[] 且 actual=[] → order=1（正确没调）
+    else:
+        order_ok = True
+
+    precision = prec_n / prec_d if prec_d else None
+    recall = rec_n / rec_d if rec_d else None
+    order = 1.0 if order_ok else 0.0
+    return precision, recall, order
+
+
+def _agg(values: list, key: str) -> dict:
+    """对一组单次指标聚合为 mean/min/max/n。"""
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return {"mean": None, "min": None, "max": None, "n": 0}
+    return {
+        "mean": round(sum(valid) / len(valid), 4),
+        "min": round(min(valid), 4),
+        "max": round(max(valid), 4),
+        "n": len(valid),
+    }
+
+
+def compute_tool_metrics(runs_by_id: dict[str, list[dict]]) -> dict:
+    """工具选择 Precision/Recall/顺序：跨 N 次有效 run 聚合，输出 mean/min/max。
+
+    退化 run（llm_calls<3 / turns 不完整 / error）被剔除，但仍保留在 runs 产物供复查。
+    """
+    per_run_metrics: dict[str, list[tuple]] = {}  # sid -> [(p, r, o), ...]
+    valid_runs_count: dict[str, int] = {}
+    degenerate_count: dict[str, int] = {}
+
     for s in SCENARIOS:
         if not s.has_tools or s.id == "S06":
             continue
-        r = results_by_id.get(s.id)
-        if not r:
-            continue
-        actual = r["tool_names"]
-        # Recall：期望工具（allowed_chains 并集）实际调了几个
-        expected = set()
-        for chain in s.allowed_chains:
-            expected |= set(chain)
-        expected = expected - {TOOL_QUERY_ORDER}  # query_order_tool 为可选前置
-        sel_rec_d += len(expected)
-        sel_rec_n += len(expected & set(actual))
-        # Precision：调用了多少「不在任何允许链」里的工具
-        allowed_all = set()
-        for chain in s.allowed_chains:
-            allowed_all |= set(chain)
-        extra = [t for t in actual if t not in allowed_all]
-        sel_prec_d += len(actual)
-        sel_prec_n += len(actual) - len(extra)
-        # 顺序：实际序列是否命中允许链
-        order_d += 1
-        if s.allowed_chains and _chain_hit(actual, s.allowed_chains):
-            order_n += 1
-        elif not s.allowed_chains and not actual:
-            order_n += 1  # 不应调工具且确实没调
+        runs = runs_by_id.get(s.id, [])
+        per_run_metrics[s.id] = []
+        valid_runs_count[s.id] = 0
+        degenerate_count[s.id] = 0
+        for run in runs:
+            if _is_degenerate_run(run, s):
+                degenerate_count[s.id] += 1
+                continue
+            valid_runs_count[s.id] += 1
+            p, r, o = _compute_tool_metrics_single(run, s)
+            per_run_metrics[s.id].append((p, r, o))
+
+    prec_vals: list = []
+    rec_vals: list = []
+    order_vals: list = []
+    for sid, lst in per_run_metrics.items():
+        for p, r, o in lst:
+            if p is not None:
+                prec_vals.append(p)
+            if r is not None:
+                rec_vals.append(r)
+            order_vals.append(o)
+
     return {
-        "selection_precision": round(sel_prec_n / sel_prec_d, 4) if sel_prec_d else None,
-        "selection_recall": round(sel_rec_n / sel_rec_d, 4) if sel_rec_d else None,
-        "order_accuracy": round(order_n / order_d, 4) if order_d else None,
+        "selection_precision": _agg(prec_vals, "precision"),
+        "selection_recall": _agg(rec_vals, "recall"),
+        "order_accuracy": _agg(order_vals, "order"),
+        "valid_runs_per_scenario": valid_runs_count,
+        "degenerate_runs_per_scenario": degenerate_count,
     }
 
 
@@ -615,7 +736,8 @@ async def main(runs: int, scenario_filter: Optional[str]) -> None:
         "llm_model": settings.LLM_MODEL,
         "runs": runs,
         "normal_success_rate": None,
-        "security_intercept_rate": None,
+        "indirect_security_signal_rate": None,  # S06 当前为 indirect 口径
+        "security_intercept_rate": None,       # 已弃用，保留字段供兼容；strict 改造后(D1)才启用
         "tool_metrics": None,
         "per_scenario": {},
     }
@@ -624,11 +746,17 @@ async def main(runs: int, scenario_filter: Optional[str]) -> None:
     for s in selected:
         runs_of_s = all_runs[s.id]
         passes = sum(1 for r in runs_of_s if r["passed"])
-        summary["per_scenario"][s.id] = {
+        entry = {
             "name": s.name, "user": s.user,
             "passes": passes, "total": len(runs_of_s),
             "rate": round(passes / len(runs_of_s), 4) if runs_of_s else None,
         }
+        # 非默认断言口径（indirect）显式标注，避免报告读者误以为经过工具层 code 路径
+        if s.assertion_type != "strict":
+            entry["assertion_type"] = s.assertion_type
+        if s.assertion_note:
+            entry["assertion_note"] = s.assertion_note
+        summary["per_scenario"][s.id] = entry
 
     normal_passes = sum(summary["per_scenario"][s.id]["passes"] for s in normal_selected)
     normal_total = sum(summary["per_scenario"][s.id]["total"] for s in normal_selected)
@@ -637,19 +765,24 @@ async def main(runs: int, scenario_filter: Optional[str]) -> None:
 
     if security.id in [x.id for x in selected]:
         sec = summary["per_scenario"][security.id]
-        summary["security_intercept_rate"] = round(sec["passes"] / sec["total"], 4) if sec["total"] else None
+        # 字段名诚实：当前 S06 断言是 indirect，不号称"安全拦截率"
+        rate = round(sec["passes"] / sec["total"], 4) if sec["total"] else None
+        summary["indirect_security_signal_rate"] = rate
+        summary["security_intercept_rate"] = None  # 已弃用，保留字段供老脚本兼容，值为 None
 
-    # 工具指标（只对 S06 之外的 has_tools 场景，取最近一次 run）
-    tool_results = {}
+    # 工具指标（跨 N 次有效 run 聚合，剔退化 run）
+    tool_runs: dict[str, list[dict]] = {}
     for s in selected:
-        if s.has_tools and s.id != "S06" and all_runs[s.id]:
-            tool_results[s.id] = all_runs[s.id][-1]
-    summary["tool_metrics"] = compute_tool_metrics(tool_results)
+        if s.has_tools and s.id != "S06":
+            tool_runs[s.id] = all_runs[s.id]
+    summary["tool_metrics"] = compute_tool_metrics(tool_runs)
 
-    # 节点耗时聚合
+    # 节点耗时聚合 + LLM-only 延迟（独立指标，不依赖 astream_events 归因）
     node_durs: dict[str, list[float]] = {}
+    llm_durs: list[float] = []
     llm_prompt = llm_completion = 0
     llm_calls_n = 0
+    token_source_counts = {"exact_invoke": 0, "exact_stream": 0, "unknown": 0}
     for s in selected:
         for r in all_runs[s.id]:
             for turn in r.get("turns", []):
@@ -662,11 +795,22 @@ async def main(runs: int, scenario_filter: Optional[str]) -> None:
                         llm_prompt += llm["prompt_tokens"]
                     if llm.get("completion_tokens"):
                         llm_completion += llm["completion_tokens"]
+                    # LLM-only 延迟：从 patch 内 perf_counter 取，避开 astream_events 归因盲区
+                    if llm.get("duration_ms") is not None:
+                        llm_durs.append(llm["duration_ms"])
+                    src = llm.get("token_source", "unknown")
+                    token_source_counts[src] = token_source_counts.get(src, 0) + 1
     summary["trace"] = {
         "node_latency": {k: {"count": len(v), "p50_ms": round(_pct(v, 0.5), 1), "p95_ms": round(_pct(v, 0.95), 1)} for k, v in sorted(node_durs.items())},
+        "llm_only_latency": {
+            "count": len(llm_durs),
+            "p50_ms": round(_pct(llm_durs, 0.5), 1) if llm_durs else 0.0,
+            "p95_ms": round(_pct(llm_durs, 0.95), 1) if llm_durs else 0.0,
+        },
         "llm_calls": llm_calls_n,
         "total_prompt_tokens": llm_prompt,
         "total_completion_tokens": llm_completion,
+        "token_source_counts": token_source_counts,
     }
 
     # 输出 JSON
@@ -704,31 +848,49 @@ def render_markdown(summary: dict, all_runs: dict) -> str:
     lines.append("| 指标 | 值 |")
     lines.append("|---|---|")
     lines.append(f"| 正常业务成功率 | {summary['normal_success_rate'] if summary['normal_success_rate'] is not None else '—'} |")
-    lines.append(f"| 越权拦截率 | {summary['security_intercept_rate'] if summary['security_intercept_rate'] is not None else '—'} |")
+    ind_rate = summary.get("indirect_security_signal_rate")
+    lines.append(f"| 间接安全信号率（indirect） | {ind_rate if ind_rate is not None else '—'} |")
+    if ind_rate is not None:
+        lines.append(f"| > 注：indirect = 未经过工具层 NOT_AUTHORIZED code 路径，仅凭 DB/答案关键词断言 |")
     tm = summary.get("tool_metrics") or {}
-    lines.append(f"| 工具选择 Precision | {tm.get('selection_precision', '—')} |")
-    lines.append(f"| 工具选择 Recall | {tm.get('selection_recall', '—')} |")
-    lines.append(f"| 工具顺序正确率 | {tm.get('order_accuracy', '—')} |")
+    def _fmt_metric(m):
+        if not m or m.get("mean") is None:
+            return "—"
+        return f"{m['mean']} (min {m['min']}, max {m['max']}, n={m['n']})"
+    lines.append(f"| 工具选择 Precision | {_fmt_metric(tm.get('selection_precision'))} |")
+    lines.append(f"| 工具选择 Recall | {_fmt_metric(tm.get('selection_recall'))} |")
+    lines.append(f"| 工具顺序正确率 | {_fmt_metric(tm.get('order_accuracy'))} |")
     lines.append("")
     lines.append("## 2. 场景明细\n")
-    lines.append("| 场景 | 结果 |")
-    lines.append("|---|---|")
+    lines.append("| 场景 | 结果 | 断言口径 |")
+    lines.append("|---|---|---|")
     for sid, s in summary["per_scenario"].items():
         mark = f"{s['passes']}/{s['total']} = {s['rate']}"
-        lines.append(f"| {sid} {s['name']} | {mark} |")
+        atype = s.get("assertion_type", "strict")
+        lines.append(f"| {sid} {s['name']} | {mark} | {atype} |")
     lines.append("")
     lines.append("## 3. 节点耗时 (p50/p95 ms)\n")
+    lines.append("> 仅含业务语义节点；LangChain 内部包装（RunnableSequence/Lambda 等）已剔除\n")
     lines.append("| 节点 | count | p50 | p95 |")
     lines.append("|---|---|---|---|")
     for k, v in summary["trace"]["node_latency"].items():
         lines.append(f"| {k} | {v['count']} | {v['p50_ms']} | {v['p95_ms']} |")
     lines.append("")
-    lines.append("## 4. LLM Token\n")
+    lines.append("## 4. LLM-only 延迟\n")
+    lines.append("> 独立指标，从 patch 内 perf_counter 取，不依赖 astream_events 归因\n")
+    ll = summary["trace"].get("llm_only_latency") or {}
+    lines.append(f"- LLM 调用 count：{ll.get('count', 0)}")
+    lines.append(f"- p50：{ll.get('p50_ms', '—')} ms")
+    lines.append(f"- p95：{ll.get('p95_ms', '—')} ms")
+    lines.append("")
+    lines.append("## 5. LLM Token\n")
     lines.append(f"- LLM 调用次数：{summary['trace']['llm_calls']}")
     lines.append(f"- 总 prompt tokens：{summary['trace']['total_prompt_tokens']}")
     lines.append(f"- 总 completion tokens：{summary['trace']['total_completion_tokens']}")
+    tsc = summary["trace"].get("token_source_counts") or {}
+    lines.append(f"- token 来源分布：{tsc}（unknown 应为 0；非 0 说明 astream 未返回 usage）")
     lines.append("")
-    lines.append("## 5. 失败详情\n")
+    lines.append("## 6. 失败详情\n")
     for sid, runs_of_s in all_runs.items():
         for r in runs_of_s:
             if not r["passed"]:
