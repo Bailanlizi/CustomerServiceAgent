@@ -22,6 +22,20 @@ router = APIRouter()
 conversation_manager = ConversationStateManager()
 
 
+def _refund_placeholder_answer(values: dict) -> str:
+    """根据 REFUND FSM workflow_stage 派生兜底回答,保持对话历史连续。"""
+    stage = values.get("workflow_stage")
+    if stage in {"DONE", "REJECTED"}:
+        return (
+            "当前退款流程已结束。如需办理新的退款，请重新说明订单号与原因。"
+        )
+    if stage == "WAITING_CONFIRMATION":
+        return "请在前端点击「确认提交」按钮以确认退款申请。"
+    if stage in {"IDENTIFY_ORDER", "COLLECT_REASON", "ELIGIBILITY_CHECKED", "SUBMITTED"}:
+        return "（系统暂未生成回复，请重试或补充信息）"
+    return "（系统暂未生成回复）"
+
+
 @router.get("/chat/session", response_model=ChatSessionResponse)
 async def get_chat_session(current_user_id: int = Depends(get_current_user_id)):
     """Return the authenticated user's default conversation and recent transcript."""
@@ -165,12 +179,18 @@ async def chat(
                 }, ensure_ascii=False)
                 yield f"data: {stage_payload}\n\n"
                 compacted = await conversation_manager.persist_turn(conversation, values)
-                if final_answer:
+                # P1 修复: REFUND 域若 answer 为空(终端状态短路 / 资格预检空响应等),
+                # 也写入由 workflow_stage 派生的占位 assistant 消息,保持历史连续。
+                # 非 REFUND 域继续仅在有真实回答时落库。
+                persist_answer = final_answer
+                if not persist_answer and values.get("active_domain") == "REFUND":
+                    persist_answer = _refund_placeholder_answer(values)
+                if persist_answer:
                     await conversation_manager.append_messages(
                         conversation.conversation_id,
                         current_user_id,
                         request.question,
-                        final_answer,
+                        persist_answer,
                     )
                 messages = list(values.get("messages") or [])
                 retained = conversation_manager.retained_messages(messages)

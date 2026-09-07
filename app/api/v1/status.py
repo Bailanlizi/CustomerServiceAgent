@@ -18,7 +18,7 @@ router = APIRouter()
 class StatusResponse(BaseModel):
     """状态响应"""
     thread_id: str
-    status:  str  # "PROCESSING", "WAITING_ADMIN", "APPROVED", "REJECTED", "COMPLETED", "ERROR"
+    status:  str  # "IDLE", "WAITING_ADMIN", "APPROVED", "REJECTED", "COMPLETED", "ERROR"
     message: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
     timestamp: str
@@ -91,11 +91,14 @@ async def get_thread_status(
                     timestamp=latest_audit.updated_at.isoformat()
                 )
         
-        # 4. 无审核记录，返回正常处理中
+        # 4. 无审核记录：当前没有进行中的退款/审核事件，返回中性 IDLE 态。
+        # 此前这里无条件兜底 PROCESSING，导致前端在查订单、问政策等任意轮次
+        # 都把"退款处理中"横幅拼进机器人回复。PROCESSING 只能来自退款申请的
+        # 业务状态（RefundStatus），不是本接口的兜底值。
         return StatusResponse(
             thread_id=thread_id,
-            status="PROCESSING",
-            message="正在处理您的请求...",
+            status="IDLE",
+            message="当前无进行中的售后事项",
             data={},
             timestamp=latest_message.created_at.isoformat() if latest_message else ""
         )

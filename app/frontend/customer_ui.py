@@ -415,7 +415,11 @@ def create_chat_interface():
             )
 
         def audit_status_text(status_info: dict) -> str:
-            """返回审核状态的纯文本，不创建额外 HTML 卡片。"""
+            """返回审核状态的纯文本，不创建额外 HTML 卡片。
+
+            仅渲染真实业务状态（审核中/通过/拒绝）。PROCESSING 是无审计事件时的
+            过渡态，不代表用户有退款在处理，不能作为常驻横幅拼进每条回复。
+            """
             status = status_info.get("status", "UNKNOWN")
             data = status_info.get("data", {})
             if status == "WAITING_ADMIN":
@@ -427,7 +431,8 @@ def create_chat_interface():
             if status == "APPROVED":
                 return "审核通过\n退款流程已启动"
             if status == "PROCESSING":
-                return "退款处理中\n请稍后查询处理结果"
+                # 过渡态不渲染横幅（后端已改为返回 IDLE，这里双保险）。
+                return ""
             if status == "REJECTED":
                 return f"审核拒绝\n{data.get('admin_comment', '无理由')}"
             return ""

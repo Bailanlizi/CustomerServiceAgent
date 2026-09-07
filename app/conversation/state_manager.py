@@ -189,6 +189,18 @@ class ConversationStateManager:
             slots = dict(memory.get("collected_slots") or {})
             slots["order_sn"] = order_sn
             memory["collected_slots"] = slots
+            # P3 修复: FSM 阶段推进（route_refund_stage）以 active_order_id 为门控，
+            # 此前 ID 只在回合末尾的 persist_turn 反查写入，导致用户首次报订单号的
+            # 那一轮 FSM 仍停在 IDENTIFY_ORDER，浪费一轮并生成"已收到订单号"式的
+            # 无效应答。这里在回合开始时当场反查；查不到（非本人订单 / 不存在）
+            # 保持 None，由 node_identify_order 给出确定性校验提示。
+            # 测试用 SimpleNamespace 伪造 session（无 user_id）时跳过，行为与旧版一致。
+            if memory.get("active_order_id") is None:
+                user_id = getattr(session, "user_id", None)
+                if user_id is not None:
+                    order_id = await self._resolve_order_id(order_sn, user_id)
+                    if order_id is not None:
+                        memory["active_order_id"] = order_id
 
         extraction = await self._extract(question, memory)
         previous_domain = memory.get("active_domain")
@@ -226,6 +238,31 @@ class ConversationStateManager:
         if slots.get("user_confirmed"):
             memory["user_confirmed"] = True
         memory["collected_slots"] = slots
+        # P1 修复: 当用户主动发起新一轮退款且工作记忆中残留着上一笔的
+        # refund_submitted_id 终态时,清空这些终态字段让 FSM 重新走流程。
+        # 否则 route_refund_stage 第一优先级命中 refund_submitted_id 直接返回
+        # DONE,子图跳过所有节点,answer 为空,前端只渲染 PROCESSING 状态文本,
+        # 且不会再调 submit_refund_application,管理员端自然也看不到新任务。
+        # 触发条件: 显式新目标(explicit_new_goal=True) 或强新退款意图前缀
+        # ("我要退/我想退/申请退/办理退/发起退")。同时排除状态查询词,避免
+        # "我的退款申请进度怎么样了"这种查进度轮次被误清。
+        status_query_terms = ("进度", "状态", "多久", "怎么样了", "申请编号", "编号")
+        new_refund_prefixes = ("我要退", "我想退", "申请退", "办理退", "发起退", "退一下", "退掉")
+        is_new_refund_intent = explicit_new_destination or (
+            any(question.startswith(p) for p in new_refund_prefixes)
+            and not any(t in question for t in status_query_terms)
+        )
+        if (
+            memory["active_domain"] == "REFUND"
+            and slots.get("refund_submitted_id")
+            and is_new_refund_intent
+        ):
+            slots.pop("refund_submitted_id", None)
+            slots.pop("user_confirmed", None)
+            memory["collected_slots"] = slots
+            memory["user_confirmed"] = None
+            memory["last_tool_result"] = None
+            memory["workflow_stage"] = None
         # P1 修复: 将退款原因分类写入 working memory，让 submit_refund_application
         # 通过 InjectedState 直接消费，避免 LLM 在工具调用时再次做 free-text → enum 映射。
         if extraction.refund_reason_category:

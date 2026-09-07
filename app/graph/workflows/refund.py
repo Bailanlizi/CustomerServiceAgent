@@ -26,7 +26,7 @@ P2 changes:
 from enum import Enum
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from app.core.database import async_session_maker
@@ -123,24 +123,41 @@ def route_refund_stage(state: AgentState) -> str:
 async def node_identify_order(state: AgentState) -> dict[str, Any]:
     """阶段 1: 询问订单号。
 
-    若 working memory 已记录 active_order_id（prepare_turn 通过反查 Order
-    表写入），则透传；否则用 LLM 生成追问订单号的话术。
+    三种情形：
+      1. active_order_id 已存在（prepare_turn 同轮反查成功）→ 阶段透传。
+      2. active_order_sn 存在但 active_order_id 缺失 → 用户刚报过订单号但反查
+         失败（非本人订单或不存在）：确定性回复校验提示，不让 LLM 自由发挥
+         （旧版 LLM 会生成"已收到订单号"式确认话术，读起来像查询订单，
+         且 FSM 实际停在 IDENTIFY_ORDER，误导用户）。
+      3. 两者都缺 → LLM 生成追问订单号的话术。
     """
     if state.get("active_order_id"):
         # 已经在 prepare_turn 反查出订单 ID，阶段透传
         return {}
+    order_sn = state.get("active_order_sn")
+    if order_sn:
+        answer = (
+            f"❌ 未查询到订单 {order_sn}，或该订单不在您的账户名下。"
+            "请核对订单号后重新提供。"
+        )
+        return {"answer": answer, "messages": [AIMessage(content=answer)]}
     from app.graph.nodes import llm
     response = None
     async for chunk in llm.astream([
         SystemMessage(content=(
-            "你是电商售后助手。当前阶段：询问订单号。"
-            "已知订单号时不要重复询问；未知时礼貌请用户提供订单号（如 SN20240001）。"
-            "不要调用任何工具，不要输出订单详情。"
+            "你是电商售后助手。当前阶段：办理退货，需要先确认订单。"
+            "用户尚未提供有效订单号，请礼貌请用户提供订单号（例如 SN20240001）。"
+            "只输出这句追问，不要确认收到订单号，不要回答其他问题，"
+            "不要调用任何工具，不要编造订单信息。"
         )),
         HumanMessage(content=state["question"]),
     ]):
         response = chunk if response is None else response + chunk
-    answer = response.content if response else "请提供要退货的订单号。"
+    answer = (
+        response.content
+        if response and getattr(response, "content", "")
+        else "请提供要退货的订单号。"
+    )
     return {"answer": answer, "messages": [response]}
 
 
@@ -165,7 +182,11 @@ async def node_collect_reason(state: AgentState) -> dict[str, Any]:
         HumanMessage(content=state["question"]),
     ]):
         response = chunk if response is None else response + chunk
-    answer = response.content if response else "请说明退货原因。"
+    answer = (
+        response.content
+        if response and getattr(response, "content", "")
+        else "请说明退货原因。"
+    )
     return {"answer": answer, "messages": [response]}
 
 
@@ -213,8 +234,12 @@ async def node_await_confirmation(state: AgentState) -> dict[str, Any]:
         )),
     ]):
         response = chunk if response is None else response + chunk
-    answer = response.content if response else (
-        f"订单 {order_sn} 退款申请确认中。\n请在前端点击「确认提交」按钮。"
+    answer = (
+        response.content
+        if response and getattr(response, "content", "")
+        else (
+            f"订单 {order_sn} 退款申请确认中。\n请在前端点击「确认提交」按钮。"
+        )
     )
     return {"answer": answer, "messages": [response]}
 
@@ -281,9 +306,26 @@ async def refund_subgraph_entry(state: AgentState) -> dict[str, Any]:
     """子图入口：根据 route_refund_stage 决定下一节点。
 
     仅写入 workflow_stage 字段；具体路由由 LangGraph add_conditional_edges 处理。
+    P1 修复: 当路由直接落到 DONE / REJECTED 终态时,写入兜底 answer,
+    避免子图在没有任何业务节点执行的情况下 answer 为空(用户看到空白或
+    PROCESSING 状态文本)。真实提交/拒绝的话术由 node_submit / 短路路径给出。
     """
     next_stage = route_refund_stage(state)
-    return _stage_payload(RefundStage(next_stage))
+    stage = RefundStage(next_stage)
+    payload: dict[str, Any] = {"workflow_stage": stage.value}
+    if stage in (RefundStage.DONE, RefundStage.REJECTED):
+        slots = _slots(state)
+        submitted = slots.get("refund_submitted_id")
+        if submitted:
+            payload["answer"] = (
+                f"该订单已有退款申请(编号 #{submitted}),无需重复提交。"
+                "如需查询进度,请直接告诉我申请编号。"
+            )
+        else:
+            payload["answer"] = (
+                "当前退款流程已结束。如需办理新的退款,请重新说明订单号与原因。"
+            )
+    return payload
 
 
 # ===========================================
