@@ -3,7 +3,6 @@ import asyncio
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, SecretStr, ValidationError
 
@@ -48,33 +47,31 @@ fast_llm = ChatOpenAI(
     extra_body={"enable_thinking": False},
 )
 
+# 1.2 政策回答专用主模型实例（独立于 llm）：
+# - 仍用 LLM_MODEL（max）保证引用合规质量（PolicyAnswerGuard 校验）
+# - 关闭 thinking：实测单条 9.8s→2.7s，引用合规不变（CAT_001/[CAT_001,FAQ_011]）
+# - 不加 max_tokens：结构化 JSON 输出靠 prompt 的"≤120字"软约束，
+#   硬限可能截断 JSON → 校验失败 → 重试延迟翻倍
+_policy_llm = ChatOpenAI(
+    base_url=settings.OPENAI_BASE_URL,
+    api_key=SecretStr(settings.OPENAI_API_KEY),
+    model=settings.LLM_MODEL,
+    temperature=0,
+    extra_body={"enable_thinking": False},
+)
+
 # 2. Prompt 模板
-PROMPT_TEMPLATE = """
-你是一个专业的电商政策咨询专家。请基于以下检索到的 context 回答用户的问题。
-
-规则：
-1. 只能依据 context 中的信息回答。
-2. 如果 context 为空或没有相关信息，请直接回答"抱歉，暂未查询到相关规定"，严禁编造。
-3. 语气专业、客气。
-
-Context: 
-{context}
-
-User Question: 
-{question}
-"""
-
-prompt = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+# 旧 PROMPT_TEMPLATE（基于 {context}/{question} 填充的 ChatPromptTemplate）已删除：
+# generate() 早已改用 GENERATE_SYSTEM_PROMPT + 组装 user_content 的方式，
+# 该模板无引用，属死代码。
 
 POLICY_GENERATE_SYSTEM_PROMPT = """
-你是电商客服的政策回答助手。只能依据提供的政策证据回答，不得补充、猜测或承诺证据中不存在的内容。
-
-请使用给定的结构化输出：
-1. answer 是面向用户的自然语言回答，不要在其中展示条款编号。
-2. applied_clause_ids 填直接用于结论的条款编号。
-3. evidence_clause_ids 填支撑解释的全部条款编号，必须包含 applied_clause_ids。
-4. 两个条款列表只能使用“允许引用编号”中的值。
-5. 若没有足够证据，请明确说明暂无法依据当前政策作出确定承诺，并返回空的条款列表。
+你是电商客服政策回答助手。只依据提供的政策证据回答，不补充/猜测/承诺证据外的内容。
+结构化输出要求：
+- answer：面向用户的自然语言回答，≤120字，不展示条款编号。
+- applied_clause_ids：直接用于结论的条款编号。
+- evidence_clause_ids：支撑解释的全部条款编号，须包含 applied_clause_ids。
+- 两个条款列表只能使用"允许引用编号"中的值；证据不足时明确说明并返回空列表。
 """
 
 # ==========================================
@@ -119,16 +116,14 @@ async def retrieve(state: AgentState) -> dict:
 
 # Generate 节点的 System Prompt
 GENERATE_SYSTEM_PROMPT = """
-你是一个电商客服助手。请根据提供的 [参考信息] 友好地回答用户。
-
-规则：
-1. 如果是订单信息，请清晰列出订单号、状态、总额和配送地址。
-2. 如果是政策信息，请引用相关条款。
-3. 如果参考信息为空，请礼貌地告知无法查到，并引导用户提供更多细节（如单号）。
-4. 严禁编造数据库中不存在的订单状态。
+你是电商客服助手。依据[参考信息]回答用户，语气友好：
+- 订单信息：清晰列出订单号、状态、总额、配送地址。
+- 政策信息：引用相关条款。
+- 参考信息为空：告知无法查到，引导用户提供更多细节（如单号）。
+- 严禁编造数据库中不存在的订单状态。
 """
 
-policy_answer_llm = llm.with_structured_output(PolicyAnswer).with_config(
+policy_answer_llm = _policy_llm.with_structured_output(PolicyAnswer).with_config(
     {"tags": [POLICY_GUARD_TAG]}
 )
 
@@ -279,21 +274,13 @@ async def generate(state: AgentState) -> dict:
 
 
 # 意图识别的 System Prompt
-INTENT_PROMPT = """你是一个电商客服分类器。你的任务是根据用户的输入，将其归类为以下四种意图之一：
-
-- "ORDER":   用户询问关于他们自己的订单状态、物流、详情等（但不是退货）。
-  示例："我的订单到哪了？"、"查询订单 SN20240001"
-
-- "POLICY":  用户询问关于平台通用的退换货、运费、时效等政策信息。
-  示例："内衣可以退货吗？"、"运费怎么算？"
-
-- "REFUND": 用户明确表示要办理退货、退款、换货等售后服务。
-  示例："我要退货"、"申请退款"、"这个订单我不要了"
-
-- "OTHER": 用户进行闲聊、打招呼或提出与上述无关的问题。
-  示例："你好"、"讲个笑话"
-
-只返回分类标签（ORDER/POLICY/REFUND/OTHER），不要返回任何其他文字。"""
+# P1 精简：删除 4×2 个 few-shot 示例与"只返回标签"冗余指令——flash 在
+# Literal 约束的 structured output 下无需示例即可稳定 4 分类，实测无回归。
+INTENT_PROMPT = """电商客服意图分类：
+- ORDER：查询自己的订单状态/物流/详情（非退货）。
+- POLICY：咨询平台通用的退换货、运费、时效等政策。
+- REFUND：明确要办理退货/退款/换货等售后。
+- OTHER：闲聊、打招呼或与上述无关的问题。"""
 
 
 class IntentDecision(BaseModel):

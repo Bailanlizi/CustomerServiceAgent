@@ -136,6 +136,8 @@
 - `nodes.py:40-55` PROMPT_TEMPLATE：删除死代码。
 - `nodes.py:107-115` GENERATE_SYSTEM_PROMPT：删风格词，4 条规则合并精简。
 - `nodes.py:57-66` POLICY_GENERATE_SYSTEM_PROMPT：加「answer 不超过 120 字」，规则合并为 4 条；policy_answer_llm 配 `max_tokens=700`。
+  - **实施更正**：max_tokens 硬限**未加**——结构化 JSON 输出截断会触发 PolicyAnswerGuard 校验失败 → 重试延迟翻倍（方案预警的风险）。靠 prompt 的「≤120 字」软约束即可。
+  - **关键追加**：给 policy_answer_llm 单独构造 `_policy_llm` 实例，加 `extra_body={"enable_thinking": False}`。实测 max 模型 thinking 开/关：单条 9.8s→2.7s，引用合规不变（CAT_001/[CAT_001,FAQ_011]）。**这是 p95 下降的核心**。
   - **验证要点**：S05 必须 2/2 通过且 `policy_answer_audit.retry_count` 全为 0（无截断重试）；若出现截断，回退 max_tokens 或放宽字数。
 
 预期：政策生成 completion 1023 → 400-600，省 2-4s；边角路径 prompt 体积下降。
@@ -201,7 +203,7 @@
 | 基线 | — | — | agent_e2e_20260907_084355.json | 56/56 | 9617 / 15677 ms | qwen3.7-max；llm_calls=84（stream 7） |
 | 1 | 退款话术模板化 | `--runs 2` | agent_e2e_20260907_105130.json | 16/16 | 9078 / 15854 ms | identify_order 4726/6404ms→1.1/1.4ms；refund_agent p95 5965→225ms；exact_stream 7→0；单测 48 全过；S04 模板断言通过 |
 | 2 | 模型分层 + extractor 裁剪 | `--runs 2` | agent_e2e_20260907_131155.json | 16/16 | **894 / 15768 ms** | 首验 125919 失败（flash thinking 截断→S03/S07/S08 全挂）→ 关 thinking 修复；completion 总量 11039→3211；prompt 总量 9520→6564；intent_router 不再触发 LLM；p95 仍为政策生成（步骤 3 目标） |
-| 3 | Prompt 清理 + 政策限长 | `--runs 2` | （待填） | | | |
+| 3 | Prompt 清理 + 政策限长 | `--runs 2` | agent_e2e_20260907_132841.json | 16/16 | **894 / 2319 ms** | 删 PROMPT_TEMPLATE 死代码 + ChatPromptTemplate import；INTENT_PROMPT 删 8 示例；policy 关 thinking（9.8s→2.7s）；generate 节点 p50 16924→2614ms；S05 completion 1023→103，retry_count=0；单测 64 全过 |
 | 4 | 政策回答分段推送 | `--runs 2` | （待填） | | | |
 | 终验 | P2 全量 | `--runs 7` | （待填） | | | 最终数字沉淀 README |
 | 5（可选） | 政策显式缓存 | `--runs 2` | （待填） | | | token 测量结论： |
