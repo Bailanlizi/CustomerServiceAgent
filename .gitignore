@@ -12,3 +12,7 @@ data/*.pdf
 data/*.md
 !data/shipping_policy.md  # 允许保留一个示例文件
 .pytest_cache/
+
+# 求职用私有笔记（不进入版本库）
+RESUME_NOTES.md
+INTERVIEW_QA.md

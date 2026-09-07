@@ -61,7 +61,113 @@
 - 退款申请及审核决策写入审计日志，管理员可查看待办、会话上下文和风险信息；
 - 用户端与管理员端均为 Gradio 界面，状态变化可通过 WebSocket 同步。
 
-## 架构与目录
+## 架构与目录结构
+
+系统采用「薄编排（Thin Orchestrator）+ 领域子图 + 确定性服务」的分层架构：客户端请求经 FastAPI 网关进入 LangGraph 调度器，由它路由到订单 / 政策 / 退款三个领域子图；高风险操作（权限、退款资格、状态迁移、资金）全部下沉到后端确定性逻辑与工具注册表 Guard，LLM 仅负责意图理解、信息抽取与受限话术生成。会话记忆由 `state_manager` 统一维护，异步任务交给 Celery，状态以 PostgreSQL + pgvector 与 Redis Checkpointer 持久化。
+
+```mermaid
+flowchart TB
+    %% ===== ① 客户端 / 展示层 =====
+    subgraph CLIENT["① 客户端 / 展示层"]
+        CUST["Gradio 用户端 UI<br/>:7860"]
+        ADMIN["Gradio 管理员工作台<br/>:7861"]
+        WS["WebSocket 实时状态推送"]
+    end
+
+    %% ===== ② API 网关层 =====
+    subgraph API["② API 网关层 · FastAPI (app/api/v1)"]
+        AUTH["auth.py · JWT 鉴权"]
+        CHAT["chat.py · SSE 流式对话"]
+        STATUS["status.py · 任务状态"]
+        ADM["admin.py · 审核决策"]
+        WSR["websocket.py"]
+    end
+
+    %% ===== ③ 编排核心层 =====
+    subgraph ORCH["③ 编排核心层 (app/graph)"]
+        ORCHESTRATOR["Thin Orchestrator<br/>compile_app_graph() · workflow.py"]
+        REGISTRY["ToolCapabilityRegistry<br/>5 重 Guard · tool_registry.py"]
+        NODES["nodes.py · state.py · tools.py"]
+    end
+
+    %% ===== ④ 领域子图 =====
+    subgraph DOMAIN["④ 领域子图 (app/graph/workflows)"]
+        ORDER["OrderWorkflow · order.py"]
+        POLICY["Policy RAG + Guardrail<br/>检索→生成→校验"]
+        REFUND["RefundWorkflow (FSM) · refund.py"]
+    end
+
+    %% ===== ⑤ 服务层 =====
+    subgraph SVC["⑤ 服务层 (app/services)"]
+        RETRIEVAL["policy_retrieval.py<br/>向量检索 + 重排"]
+        GUARD["policy_answer_guard.py<br/>引用合规性校验"]
+        RSVC["refund_service.py<br/>资格 / 幂等 / FSM"]
+    end
+
+    %% ===== ⑥ 会话与记忆 =====
+    subgraph MEM["⑥ 会话与记忆 (app/conversation)"]
+        SM["state_manager.py<br/>resolve / prepare / persist"]
+        MEM4["4 层记忆<br/>消息 / 工作记忆 / 摘要 / DB 事实"]
+    end
+
+    %% ===== ⑦ 异步任务层 =====
+    subgraph ASYNC["⑦ 异步任务层 · Celery (app/tasks)"]
+        PAY["支付任务 (mock)"]
+        NOTIFY["通知任务"]
+        RECOVER["超时恢复扫描"]
+    end
+
+    %% ===== ⑧ 数据与基础设施 =====
+    subgraph DATA["⑧ 数据与基础设施"]
+        PG[("PostgreSQL + pgvector<br/>业务表 / 知识库 / 审计")]
+        REDIS[("Redis<br/>Checkpointer + 缓存")]
+        LLM["外部 LLM / Embedding API<br/>(OpenAI-compatible)"]
+    end
+
+    %% ===== 连接关系 =====
+    CUST --> CHAT
+    ADMIN --> ADM
+    CUST -.-> WS
+    ADMIN -.-> WS
+    WS --> WSR
+
+    AUTH --> ORCHESTRATOR
+    CHAT --> ORCHESTRATOR
+    STATUS --> ORCHESTRATOR
+    WSR --> ORCHESTRATOR
+    ADM --> RSVC
+
+    ORCHESTRATOR --> REGISTRY
+    ORCHESTRATOR --> NODES
+    REGISTRY --> NODES
+    NODES --> ORDER
+    NODES --> POLICY
+    NODES --> REFUND
+
+    ORDER --> RSVC
+    REFUND --> RSVC
+    POLICY --> RETRIEVAL
+    POLICY --> GUARD
+    RSVC --> PAY
+
+    ORCHESTRATOR --> SM
+    SM --> MEM4
+
+    NODES -.触发.-> ASYNC
+    RSVC --> PG
+    RETRIEVAL --> PG
+    SM --> PG
+    ADM --> PG
+
+    ORCHESTRATOR --> REDIS
+    MEM4 --> REDIS
+
+    NODES --> LLM
+    RETRIEVAL --> LLM
+    GUARD --> LLM
+```
+
+### 目录结构
 
 ```text
 app/
@@ -176,16 +282,16 @@ uv run python app/frontend/admin_dashboard.py
 
 所有 `/api/v1` 接口（除注册、登录外）使用 `Authorization: Bearer <token>`。
 
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `POST` | `/api/v1/register` | 注册用户并获取令牌 |
-| `POST` | `/api/v1/login` | 登录并获取令牌 |
-| `GET` | `/api/v1/me` | 获取当前用户信息 |
-| `GET` | `/api/v1/chat/session` | 恢复当前用户最近会话及消息记录 |
-| `POST` | `/api/v1/chat` | SSE 流式客服对话；支持 `conversation_id` 与退款确认标志 |
-| `GET` | `/api/v1/status/{thread_id}` | 查询任务状态 |
-| `GET` | `/api/v1/admin/tasks` | 获取管理员审核队列 |
-| `POST` | `/api/v1/admin/resume/{audit_log_id}` | 提交管理员审核决策 |
+| 方法     | 路径                                    | 用途                                      |
+| ------ | ------------------------------------- | --------------------------------------- |
+| `POST` | `/api/v1/register`                    | 注册用户并获取令牌                               |
+| `POST` | `/api/v1/login`                       | 登录并获取令牌                                 |
+| `GET`  | `/api/v1/me`                          | 获取当前用户信息                                |
+| `GET`  | `/api/v1/chat/session`                | 恢复当前用户最近会话及消息记录                         |
+| `POST` | `/api/v1/chat`                        | SSE 流式客服对话；支持 `conversation_id` 与退款确认标志 |
+| `GET`  | `/api/v1/status/{thread_id}`          | 查询任务状态                                  |
+| `GET`  | `/api/v1/admin/tasks`                 | 获取管理员审核队列                               |
+| `POST` | `/api/v1/admin/resume/{audit_log_id}` | 提交管理员审核决策                               |
 
 以 Swagger 文档为准获取完整请求与响应 schema。
 
@@ -225,9 +331,18 @@ uv run pytest -m integration -q
 
 未设置 `RUN_INTEGRATION_TESTS=1` 时，集成测试会安全跳过，不会误连开发数据库或真实外部服务。集成测试覆盖认证/会话恢复、SSE API 契约及真实 PostgreSQL 下同订单并发退款只能成功一次。
 
-### Agent 端到端评估
+### Agent 端到端评估与延迟优化
 
-针对「Agent 是否真把任务跑通」这一维度，提供 8 场景端到端评测脚本，复用 `resolve_session → prepare_turn → graph → persist_turn` 真实链路（含重登恢复），以 DB 断言 + `ToolOutcome.code` + 工具链 oracle 做机器判定：
+针对「Agent 是否真把任务跑通」与「LLM 延迟瓶颈」两个核心问题，分别用 8 场景端到端评测 + P0–P2 四步迭代收敛。完整迭代记录见 `docs/llm-latency-optimization-final.md`，配套设计文档见 `docs/llm-latency-optimization.md`。
+
+**已落地的 4 步优化**（基线 → 终验，p95 下降 85%）：
+
+1. **退款三话术节点确定性模板化**（P0）—— 消灭 7 次流式 LLM 话术调用（`refund.py` 三个 astream 节点 → 固定模板）。
+2. **模型分层 + thinking 关闭**（P0）—— 高频轻任务（意图分类、extractor、闲聊 generate、summarizer）切到 `qwen3.7-flash` + `enable_thinking: false`；政策回答保留 `qwen3.7-max` 保证 `PolicyAnswerGuard` 引用合规。
+3. **Prompt 清理与政策回答限长**（P1）—— 删 few-shot、合并规则、记忆白名单投影（extractor prompt 从 730 tokens 稳定到 ~150 tokens），`generate` 节点 p50 15679→2408ms。
+4. **政策回答校验后分段推送**（P2）—— 校验通过的 `fallback_answer` 改为 20 字切片 + 20ms 间隔推送，TTFT 体验改善（总延迟不变，安全不变：未通过校验的 token 仍不泄露给前端）。
+
+8 场景端到端评测脚本复用 `resolve_session → prepare_turn → graph → persist_turn` 真实链路（含重登恢复），以 DB 断言 + `ToolOutcome.code` + 工具链 oracle 做机器判定：
 
 ```bash
 uv run python scripts/eval_agent_e2e.py --runs 2
@@ -235,14 +350,14 @@ uv run python scripts/eval_agent_e2e.py --runs 2
 
 产出 `eval/runs/agent_e2e_<timestamp>.json`（机器复查）与 `.md`（面试展示）。以分层模型配置（高频轻任务用 `qwen3.7-flash`、政策回答保留 `qwen3.7-max`，统一关闭 thinking）跑 8 场景 × 7 次的实测结果（`eval/runs/agent_e2e_20260907_140529.*`）：
 
-| 指标 | 值 | 口径说明 |
-| --- | --- | --- |
-| 正常业务成功率 | 1.0（49/49） | DB 终态 + 答案关键词断言，跨 7 次聚合 |
-| 间接安全信号率（indirect） | 1.0（7/7） | S06 越权：测 LLM 间接拒绝，**未走工具权限层（NOT_AUTHORIZED）** |
-| 工具选择 Recall / Precision | 1.0 / 1.0 | 跨 7 次 mean（n=21 / n=35） |
-| 工具顺序正确率 | 1.0 | 跨 7 次 mean（n=42） |
-| LLM-only 延迟（p50 / p95） | **0.9s / 2.4s** | patch 内 perf_counter 直采，n=77；较全 max 单模型基线（9.6s/15.7s）优化 -91%/-85% |
-| Token 真实总值 | 28,327 | exact_invoke=77 / exact_stream=0；prompt 22834 / completion 5493 |
+| 指标                      | 值               | 口径说明                                                               |
+| ----------------------- | --------------- | ------------------------------------------------------------------ |
+| 正常业务成功率                 | 1.0（49/49）      | DB 终态 + 答案关键词断言，跨 7 次聚合                                            |
+| 间接安全信号率（indirect）       | 1.0（7/7）        | S06 越权：测 LLM 间接拒绝，**未走工具权限层（NOT\_AUTHORIZED）**                     |
+| 工具选择 Recall / Precision | 1.0 / 1.0       | 跨 7 次 mean（n=21 / n=35）                                            |
+| 工具顺序正确率                 | 1.0             | 跨 7 次 mean（n=42）                                                   |
+| LLM-only 延迟（p50 / p95）  | **0.9s / 2.4s** | patch 内 perf\_counter 直采，n=77；较全 max 单模型基线（9.6s/15.7s）优化 -91%/-85% |
+| Token 真实总值              | 28,327          | exact\_invoke=77 / exact\_stream=0；prompt 22834 / completion 5493  |
 
 指标口径、S06/S08 的能力边界说明、token 统计完整性见 `docs/agent-evaluation.md` 与 `docs/agent-evaluation-revision.md`；LLM 延迟优化的完整迭代记录（基线对比、四步改动、踩坑与经验）见 `docs/llm-latency-optimization-final.md`，配套设计文档见 `docs/llm-latency-optimization.md`。结果为小样本工程评估：**S06 越权与 S08 幂等的真实能力（权限层 / submit 层）尚未验证**，非生产置信区间。
 
@@ -255,24 +370,4 @@ uv run python scripts/eval_agent_e2e.py --runs 2
 - 暂未引入多会话列表、会话搜索、客服工单/SLA、人工实时接管和长期用户画像；
 - 生产部署前还应收紧 CORS、替换默认基础设施密码、使用密钥管理、接入真实监控告警与支付网关。
 
-## 界面示例
-
-### 订单查询
-
-<img src="assets/image/order_query.png" width="600" alt="订单查询" />
-
-### 退货申请
-
-<img src="assets/image/refund_apply.png" width="600" alt="退货申请" />
-
-### 政策咨询
-
-<img src="assets/image/policy_ask.png" width="600" alt="政策咨询" />
-
-### 意图识别
-
-<img src="assets/image/intent_detect.png" width="600" alt="意图识别" />
-
-### 越权订单查询拦截
-
-<img src="assets/image/illegal_query.png" width="600" alt="非法查询" />
+##
