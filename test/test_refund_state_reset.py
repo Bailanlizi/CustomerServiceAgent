@@ -196,42 +196,23 @@ async def test_refund_subgraph_entry_does_not_emit_answer_for_non_terminal():
 
 
 # ============================================================
-# C. LLM 空内容兜底
+# C. 话术节点确定性模板（P0：原 LLM 流式追问已改为固定模板，不再调模型）
 # ============================================================
-class _FakeAIMessage:
-    """模拟 AIMessage 但 content 为空字符串。"""
-
-    def __init__(self, content: str = ""):
-        self.content = content
-
-
 @pytest.mark.asyncio
-async def test_identify_order_fallback_when_llm_returns_empty_content(monkeypatch):
-    """LLM 返回 AIMessage(content="")时,必须走兜底文案,不能返回空 answer。"""
-    from app.graph import nodes as nodes_mod
-
-    async def fake_astream(_messages):
-        yield _FakeAIMessage(content="")
-
-    monkeypatch.setattr(nodes_mod, "llm", SimpleNamespace(astream=fake_astream))
-
+async def test_identify_order_uses_template_when_no_order_sn():
+    """缺订单号时返回固定追问话术，且 messages 与 answer 一致。"""
     from app.graph.workflows import refund as refund_mod
 
     state = {"question": "我要退款", "messages": []}
     result = await refund_mod.node_identify_order(state)
-    assert result["answer"], "必须返回兜底文案"
+    assert result["answer"], "必须返回追问话术"
     assert "订单号" in result["answer"]
+    assert result["messages"][0].content == result["answer"]
 
 
 @pytest.mark.asyncio
-async def test_collect_reason_fallback_when_llm_returns_empty_content(monkeypatch):
-    from app.graph import nodes as nodes_mod
-
-    async def fake_astream(_messages):
-        yield _FakeAIMessage(content="")
-
-    monkeypatch.setattr(nodes_mod, "llm", SimpleNamespace(astream=fake_astream))
-
+async def test_collect_reason_uses_template_when_reason_missing():
+    """订单已确认但缺原因时返回固定追问话术。"""
     from app.graph.workflows import refund as refund_mod
 
     state = {
@@ -241,31 +222,29 @@ async def test_collect_reason_fallback_when_llm_returns_empty_content(monkeypatc
         "messages": [],
     }
     result = await refund_mod.node_collect_reason(state)
-    assert result["answer"], "必须返回兜底文案"
+    assert result["answer"], "必须返回追问话术"
     assert "退货原因" in result["answer"] or "原因" in result["answer"]
+    assert result["messages"][0].content == result["answer"]
 
 
 @pytest.mark.asyncio
-async def test_await_confirmation_fallback_when_llm_returns_empty_content(monkeypatch):
-    from app.graph import nodes as nodes_mod
-
-    async def fake_astream(_messages):
-        yield _FakeAIMessage(content="")
-
-    monkeypatch.setattr(nodes_mod, "llm", SimpleNamespace(astream=fake_astream))
-
+async def test_await_confirmation_uses_template_with_slots():
+    """确认话术由订单号/原因/资格结果插值生成，结尾提示「确认提交」。"""
     from app.graph.workflows import refund as refund_mod
 
     state = {
         "question": "确认提交",
         "active_order_sn": "SN20240003",
         "collected_slots": {"refund_reason": "尺码不合适"},
-        "last_tool_result": {"eligibility_message": "通过"},
+        "last_tool_result": {"eligibility_message": "✅ 符合退货条件"},
         "messages": [],
     }
     result = await refund_mod.node_await_confirmation(state)
-    assert result["answer"], "必须返回兜底文案"
+    assert result["answer"], "必须返回确认话术"
     assert "确认提交" in result["answer"]
+    assert "SN20240003" in result["answer"]
+    assert "尺码不合适" in result["answer"]
+    assert result["messages"][0].content == result["answer"]
 
 
 # ============================================================

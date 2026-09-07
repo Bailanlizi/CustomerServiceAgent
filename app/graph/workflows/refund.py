@@ -26,7 +26,7 @@ P2 changes:
 from enum import Enum
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 
 from app.core.database import async_session_maker
@@ -129,7 +129,7 @@ async def node_identify_order(state: AgentState) -> dict[str, Any]:
          失败（非本人订单或不存在）：确定性回复校验提示，不让 LLM 自由发挥
          （旧版 LLM 会生成"已收到订单号"式确认话术，读起来像查询订单，
          且 FSM 实际停在 IDENTIFY_ORDER，误导用户）。
-      3. 两者都缺 → LLM 生成追问订单号的话术。
+      3. 两者都缺 → 固定模板追问订单号（话术恒定，无需 LLM）。
     """
     if state.get("active_order_id"):
         # 已经在 prepare_turn 反查出订单 ID，阶段透传
@@ -141,53 +141,23 @@ async def node_identify_order(state: AgentState) -> dict[str, Any]:
             "请核对订单号后重新提供。"
         )
         return {"answer": answer, "messages": [AIMessage(content=answer)]}
-    from app.graph.nodes import llm
-    response = None
-    async for chunk in llm.astream([
-        SystemMessage(content=(
-            "你是电商售后助手。当前阶段：办理退货，需要先确认订单。"
-            "用户尚未提供有效订单号，请礼貌请用户提供订单号（例如 SN20240001）。"
-            "只输出这句追问，不要确认收到订单号，不要回答其他问题，"
-            "不要调用任何工具，不要编造订单信息。"
-        )),
-        HumanMessage(content=state["question"]),
-    ]):
-        response = chunk if response is None else response + chunk
-    answer = (
-        response.content
-        if response and getattr(response, "content", "")
-        else "请提供要退货的订单号。"
-    )
-    return {"answer": answer, "messages": [response]}
+    # 缺订单号：固定追问话术（原 LLM 流式生成路径已模板化，消除一次模型调用）。
+    answer = "您好，办理退货需要先确认订单。请提供要退货的订单号（例如 SN20240001）。"
+    return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
 
 async def node_collect_reason(state: AgentState) -> dict[str, Any]:
     """阶段 2: 收集退款原因。
 
-    若 working memory 已记录 refund_reason，则透传；否则用 LLM 生成追问原因的话术。
+    若 working memory 已记录 refund_reason，则透传；否则用固定模板追问原因
+    （话术恒定，无需 LLM）。
     """
     slots = _slots(state)
     if slots.get("refund_reason"):
         return {}
-    from app.graph.nodes import llm
-    order_sn = state.get("active_order_sn") or "（未确认）"
-    response = None
-    async for chunk in llm.astream([
-        SystemMessage(content=(
-            f"你是电商售后助手。当前阶段：收集退款原因。订单号已确认 = {order_sn}。"
-            "请礼貌请用户说明退货原因（自由文本，例如'尺码不合适''商品质量有问题'）。"
-            "若用户已给出原因，请直接确认收到，不要重复追问。"
-            "不要调用任何工具。"
-        )),
-        HumanMessage(content=state["question"]),
-    ]):
-        response = chunk if response is None else response + chunk
-    answer = (
-        response.content
-        if response and getattr(response, "content", "")
-        else "请说明退货原因。"
-    )
-    return {"answer": answer, "messages": [response]}
+    # 缺退款原因：固定追问话术（原 LLM 流式生成路径已模板化，消除一次模型调用）。
+    answer = "请说明退货原因（如：质量问题、尺码不合适、不想要了）。"
+    return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
 
 async def node_check_eligibility(state: AgentState) -> dict[str, Any]:
@@ -214,34 +184,21 @@ async def node_await_confirmation(state: AgentState) -> dict[str, Any]:
     """阶段 4: 生成确认话术（不调任何工具）。
 
     话术包含：订单号、退款原因、资格结果；结尾提示用户在前端点击「确认提交」按钮。
+    内容全部来自 working memory / 工具返回的确定性文案，固定模板插值即可，无需 LLM。
     """
-    from app.graph.nodes import llm
     slots = _slots(state)
     last = _last_result(state)
     order_sn = state.get("active_order_sn") or "未知"
     reason = slots.get("refund_reason") or "（未提供）"
     eligibility = last.get("eligibility_message") or "（资格未检查）"
-    response = None
-    async for chunk in llm.astream([
-        SystemMessage(content=(
-            "你是电商售后助手。当前阶段：等待用户确认退款申请。"
-            "请汇总：1) 订单号 2) 退款原因 3) 资格结果；"
-            "结尾必须明确提示用户在前端界面点击「确认提交」按钮。"
-            "不要自己调用任何工具。"
-        )),
-        HumanMessage(content=(
-            f"订单号：{order_sn}\n退款原因：{reason}\n资格结果：{eligibility}"
-        )),
-    ]):
-        response = chunk if response is None else response + chunk
     answer = (
-        response.content
-        if response and getattr(response, "content", "")
-        else (
-            f"订单 {order_sn} 退款申请确认中。\n请在前端点击「确认提交」按钮。"
-        )
+        "请确认您的退款申请信息：\n"
+        f"- 订单号：{order_sn}\n"
+        f"- 退款原因：{reason}\n\n"
+        f"资格检查结果：\n{eligibility}\n\n"
+        "如信息无误，请在前端界面点击「确认提交」按钮完成申请。"
     )
-    return {"answer": answer, "messages": [response]}
+    return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
 
 async def node_submit(state: AgentState) -> dict[str, Any]:
