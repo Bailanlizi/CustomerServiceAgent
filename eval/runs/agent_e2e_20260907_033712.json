@@ -1,0 +1,164 @@
+{
+  "summary": {
+    "llm_model": "qwen3.7-max",
+    "runs": 1,
+    "normal_success_rate": 1.0,
+    "security_intercept_rate": null,
+    "tool_metrics": {
+      "selection_precision": 1.0,
+      "selection_recall": 1.0,
+      "order_accuracy": 1.0
+    },
+    "per_scenario": {
+      "S03": {
+        "name": "正常退款全流程",
+        "user": "alice",
+        "passes": 1,
+        "total": 1,
+        "rate": 1.0
+      }
+    },
+    "trace": {
+      "node_latency": {
+        "check_eligibility": {
+          "count": 1,
+          "p50_ms": 12.5,
+          "p95_ms": 12.5
+        },
+        "dispatch_router": {
+          "count": 2,
+          "p50_ms": 0.6,
+          "p95_ms": 0.6
+        },
+        "entry": {
+          "count": 2,
+          "p50_ms": 5.4,
+          "p95_ms": 5.4
+        },
+        "refund_agent": {
+          "count": 2,
+          "p50_ms": 138.5,
+          "p95_ms": 138.5
+        },
+        "route_from_entry": {
+          "count": 2,
+          "p50_ms": 3.7,
+          "p95_ms": 3.7
+        },
+        "submit": {
+          "count": 1,
+          "p50_ms": 126.3,
+          "p95_ms": 126.3
+        }
+      },
+      "llm_calls": 0,
+      "total_prompt_tokens": 0,
+      "total_completion_tokens": 0
+    }
+  },
+  "runs": {
+    "S03": [
+      {
+        "passed": true,
+        "detail": "SN20240003 退款申请 status=PENDING",
+        "tool_names": [
+          "check_refund_eligibility",
+          "submit_refund_application"
+        ],
+        "tool_codes": [
+          "ELIGIBILITY_PASSED",
+          "REFUND_SUBMITTED"
+        ],
+        "answer": "⏳ 退货申请已提交，需人工审核。\n申请编号：#9\n退款金额：¥199.0\n风险等级：RiskLevel.LOW\n触发原因：RiskLevel.LOW 风险退款申请：¥199.0\n申请已进入人工审核，请稍后查询进度。",
+        "turns": [
+          {
+            "question": "我要退 SN20240003，质量有问题",
+            "conversation_id": "580a0354-a32f-40f9-9ca9-74cedbf11172",
+            "tool_calls": [
+              {
+                "name": "check_refund_eligibility",
+                "arguments": {},
+                "user_id": 1,
+                "code": "ELIGIBILITY_PASSED",
+                "ok": true,
+                "duration_ms": 10.6
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.5
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 44.2
+              },
+              {
+                "name": "entry",
+                "duration_ms": 5.4
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 3.7
+              },
+              {
+                "name": "check_eligibility",
+                "duration_ms": 12.5
+              }
+            ],
+            "llm_calls": []
+          },
+          {
+            "question": "确认提交",
+            "conversation_id": "580a0354-a32f-40f9-9ca9-74cedbf11172",
+            "tool_calls": [
+              {
+                "name": "submit_refund_application",
+                "arguments": {
+                  "reason_detail": {
+                    "order_sn": "SN20240003",
+                    "refund_reason": "质量有问题",
+                    "user_constraints": [
+                      "订单号SN20240003",
+                      "质量有问题"
+                    ],
+                    "user_confirmed": true
+                  },
+                  "reason_category": "QUALITY_ISSUE",
+                  "user_confirmed": true
+                },
+                "user_id": 1,
+                "code": "REFUND_SUBMITTED",
+                "ok": true,
+                "duration_ms": 110.5
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.6
+              },
+              {
+                "name": "refund_agent",
+                "duration_ms": 138.5
+              },
+              {
+                "name": "entry",
+                "duration_ms": 2.1
+              },
+              {
+                "name": "route_from_entry",
+                "duration_ms": 0.8
+              },
+              {
+                "name": "submit",
+                "duration_ms": 126.3
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      }
+    ]
+  }
+}

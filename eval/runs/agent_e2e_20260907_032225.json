@@ -1,0 +1,123 @@
+{
+  "summary": {
+    "llm_model": "qwen3.7-max",
+    "runs": 1,
+    "normal_success_rate": 1.0,
+    "security_intercept_rate": null,
+    "tool_metrics": {
+      "selection_precision": 1.0,
+      "selection_recall": null,
+      "order_accuracy": 1.0
+    },
+    "per_scenario": {
+      "S01": {
+        "name": "查询我的订单",
+        "user": "alice",
+        "passes": 1,
+        "total": 1,
+        "rate": 1.0
+      }
+    },
+    "trace": {
+      "node_latency": {
+        "LangGraph": {
+          "count": 2,
+          "p50_ms": 49.5,
+          "p95_ms": 49.5
+        },
+        "__start__": {
+          "count": 1,
+          "p50_ms": 1.4,
+          "p95_ms": 1.4
+        },
+        "compose_answer": {
+          "count": 1,
+          "p50_ms": 0.6,
+          "p95_ms": 0.6
+        },
+        "dispatch_router": {
+          "count": 1,
+          "p50_ms": 0.4,
+          "p95_ms": 0.4
+        },
+        "order_workflow": {
+          "count": 1,
+          "p50_ms": 26.7,
+          "p95_ms": 26.7
+        },
+        "query_order": {
+          "count": 1,
+          "p50_ms": 10.5,
+          "p95_ms": 10.5
+        }
+      },
+      "llm_calls": 0,
+      "total_prompt_tokens": 0,
+      "total_completion_tokens": 0
+    }
+  },
+  "runs": {
+    "S01": [
+      {
+        "passed": true,
+        "detail": "回答含本人订单",
+        "tool_names": [
+          "query_order_tool"
+        ],
+        "tool_codes": [
+          "SUCCESS"
+        ],
+        "answer": "【订单详情】\n- 订单号: SN20240003\n- 当前状态: SHIPPED\n- 订单金额: 199.00 元\n- 收货地址/物流: SF987654321\n- 商品明细: 运动T恤(x1), 运动短裤(x1)",
+        "turns": [
+          {
+            "question": "查我的订单",
+            "conversation_id": "08706a43-7311-4d33-82ec-399a9bd3d62b",
+            "tool_calls": [
+              {
+                "name": "query_order_tool",
+                "arguments": {
+                  "question": "查我的订单"
+                },
+                "user_id": 1,
+                "code": "SUCCESS",
+                "ok": true,
+                "duration_ms": 9.9
+              }
+            ],
+            "node_durations": [
+              {
+                "name": "LangGraph",
+                "duration_ms": 26.0
+              },
+              {
+                "name": "__start__",
+                "duration_ms": 1.4
+              },
+              {
+                "name": "dispatch_router",
+                "duration_ms": 0.4
+              },
+              {
+                "name": "order_workflow",
+                "duration_ms": 26.7
+              },
+              {
+                "name": "LangGraph",
+                "duration_ms": 49.5
+              },
+              {
+                "name": "query_order",
+                "duration_ms": 10.5
+              },
+              {
+                "name": "compose_answer",
+                "duration_ms": 0.6
+              }
+            ],
+            "llm_calls": []
+          }
+        ]
+      }
+    ]
+  }
+}

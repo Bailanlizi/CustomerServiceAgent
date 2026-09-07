@@ -225,6 +225,26 @@ uv run pytest -m integration -q
 
 未设置 `RUN_INTEGRATION_TESTS=1` 时，集成测试会安全跳过，不会误连开发数据库或真实外部服务。集成测试覆盖认证/会话恢复、SSE API 契约及真实 PostgreSQL 下同订单并发退款只能成功一次。
 
+### Agent 端到端评估
+
+针对「Agent 是否真把任务跑通」这一维度，提供 8 场景端到端评测脚本，复用 `resolve_session → prepare_turn → graph → persist_turn` 真实链路（含重登恢复），以 DB 断言 + `ToolOutcome.code` + 工具链 oracle 做机器判定：
+
+```bash
+uv run python scripts/eval_agent_e2e.py --runs 2
+```
+
+产出 `eval/runs/agent_e2e_<timestamp>.json`（机器复查）与 `.md`（面试展示）。以 `qwen3.7-max` 跑 8 场景 × 5 次的实测结果（`eval/runs/agent_e2e_20260907_041503.*`）：
+
+| 指标 | 值 |
+| --- | --- |
+| 正常业务成功率 | 1.0（35/35） |
+| 越权拦截率 | 1.0（5/5） |
+| 工具选择 Recall | 1.0 |
+| 工具选择 Precision | 0.857 |
+| 工具顺序正确率 | 0.833 |
+
+指标口径、S08 幂等场景的严格口径说明、token 统计边界（仅 `ainvoke` 路径）见 `docs/agent-evaluation.md` §12。结果为小样本工程评估，非生产置信区间。
+
 仓库中保留的历史基线结果显示：`primary_hit@5 = 1.000`、`clause_recall@5 = 0.9815`、`MRR@5 = 0.8685`、RAGAS faithfulness 为 `0.9091`。这些是特定数据与模型配置下的历史结果，不应视为生产环境承诺。
 
 ## 当前边界与后续方向
