@@ -205,5 +205,5 @@
 | 2 | 模型分层 + extractor 裁剪 | `--runs 2` | agent_e2e_20260907_131155.json | 16/16 | **894 / 15768 ms** | 首验 125919 失败（flash thinking 截断→S03/S07/S08 全挂）→ 关 thinking 修复；completion 总量 11039→3211；prompt 总量 9520→6564；intent_router 不再触发 LLM；p95 仍为政策生成（步骤 3 目标） |
 | 3 | Prompt 清理 + 政策限长 | `--runs 2` | agent_e2e_20260907_132841.json | 16/16 | **894 / 2319 ms** | 删 PROMPT_TEMPLATE 死代码 + ChatPromptTemplate import；INTENT_PROMPT 删 8 示例；policy 关 thinking（9.8s→2.7s）；generate 节点 p50 16924→2614ms；S05 completion 1023→103，retry_count=0；单测 64 全过 |
 | 4 | 政策回答分段推送 | `--runs 2` | agent_e2e_20260907_135254.json | 16/16 | 952 / 2213 ms | fallback_answer 切片推送（20字/片，片间 20ms）；SSE 测试断言改为拼接校验；总延迟不变（预期），单测 67 全过 |
-| 终验 | P2 全量 | `--runs 7` | （待填） | | | 最终数字沉淀 README |
+| 终验 | P2 全量 | `--runs 7` | agent_e2e_20260907_140529.json | 56/56 | **910 / 2405 ms** | p50 较基线 -91%、p95 -85%；completion 40533→5493；零退化；S06 仍 indirect；完整迭代记录见 `docs/llm-latency-optimization-final.md` |
 | 5（可选） | 政策显式缓存 | `--runs 2` | （待填） | | | token 测量结论： |
