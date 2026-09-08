@@ -305,12 +305,32 @@ uv run pytest -q
 
 测试覆盖认证与用户隔离、订单/退款规则、工具 Guard 与审计元数据、政策引用校验、SSE 输出、领域工作流及会话历史恢复等关键路径。
 
-政策评测集位于 `eval/testset.json`，共 45 题，覆盖层级冲突、多跳、品类边界、抗幻觉、量化细节和 FAQ 等维度：
+### 政策知识库与 RAG 评测
+
+政策问答由 `data/` 下 6 份 Markdown（346 行，按 `## XXX_NNN` 条款级切分，全文规则作 `policy_rule` 单存不进向量库）构建向量知识库；检索走 pgvector + FAQ 来源感知重排（`policy_retrieval.py`，命中升 1 位而非置顶）；生成采用 `with_structured_output(PolicyAnswer)` + `policy_answer_guard.py` 的引用合规校验（适用条款 ⊆ 证据条款 ⊆ 检索条款）。
+
+评测集 `eval/testset.json` 共 45 题，覆盖层级冲突、多跳、品类边界、抗幻觉、量化细节和 FAQ 等 6 类，按难度分 easy 18 / medium 21 / hard 6。评测覆盖三层口径：
+
+- **条款级检索指标**：`primary_hit@5` / `any_hit@5` / `clause_recall@5` / `MRR@5` / `nDCG@5`
+- **答案级**：`answer_clause_metrics` 校验模型适用条款与证据条款是否一致
+- **RAGAS Faithfulness**：独立 judge 模型（与业务 LLM 隔离、关闭 thinking、中文 prompt）
 
 ```bash
 uv run python scripts/run_rag_baseline.py
 uv run python scripts/evaluate_ragas.py
 ```
+
+经 5 轮迭代（baseline → 检索边界隔离 → 短查询融合 → 接生成 + RAGAS → oracle 对照），最新一轮（`eval/runs/retrieval_p1_source_aware_v2.json` + `oracle_p1_final.ragas.json`）结果：
+
+| 指标 | 值 | 口径 |
+| --- | --- | --- |
+| `primary_hit@5` | 1.0000 | 主条款召回 |
+| `clause_recall@5` | 0.9815 | 多源条款召回 |
+| `MRR@5` | 0.8685 | 首相关条款倒数排名均值 |
+| `nDCG@5` | 0.9457 | 排名质量 |
+| RAGAS Faithfulness | 0.9091（oracle 隔离）/ 0.9347（baseline） | 答案忠实度 |
+
+hard 题（6 道）`clause_recall` 0.861 为单 query embedding 的真实天花板（典型如「黑卡会员买内衣试穿」需同时命中三层语义），已列入后续方向，不靠调 prompt 刷分。完整指标定义、迭代记录与 13 条设计决策见 `docs/rag-knowledge-and-evaluation.md`。
 
 ### 集成测试
 
@@ -361,10 +381,9 @@ uv run python scripts/eval_agent_e2e.py --runs 2
 
 指标口径、S06/S08 的能力边界说明、token 统计完整性见 `docs/agent-evaluation.md` 与 `docs/agent-evaluation-revision.md`；LLM 延迟优化的完整迭代记录（基线对比、四步改动、踩坑与经验）见 `docs/llm-latency-optimization-final.md`，配套设计文档见 `docs/llm-latency-optimization.md`。结果为小样本工程评估：**S06 越权与 S08 幂等的真实能力（权限层 / submit 层）尚未验证**，非生产置信区间。
 
-仓库中保留的历史基线结果显示：`primary_hit@5 = 1.000`、`clause_recall@5 = 0.9815`、`MRR@5 = 0.8685`、RAGAS faithfulness 为 `0.9091`。这些是特定数据与模型配置下的历史结果，不应视为生产环境承诺。
-
 ## 当前边界与后续方向
 
+- 政策 RAG 的 hard 题（单 query embedding 天花板）尚未引入多向量召回 / HyDE / cross-encoder rerank，45 题评测集也待扩样到 100–200 题；
 - 政策 Guardrail 校验引用集合的合法性与可追溯性，不等同于对自然语言语义做形式化证明；
 - 退款支付目前是 mock，尚不具备真实资金通道接入条件；
 - 暂未引入多会话列表、会话搜索、客服工单/SLA、人工实时接管和长期用户画像；
